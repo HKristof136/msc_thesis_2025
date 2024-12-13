@@ -1,5 +1,13 @@
 # Project README
 
+## TODO:
+
+- ***Model from scratch***: using TensorFlow 2.0 available capabilities
+- FDM: On US options using LU decomposition is not optimal and reducing the precision to $\mathcal{O}(\Delta t, (\Delta S)^2)$
+- Cleaning pricer module, remove redundant calculations (e.g. for KI barriers use the Call/Put and KO pricers)
+- Implement parent level greek calculations
+- Actually creating the requirements.txt for reproduction
+
 ## Overview
 
 This repository contains the codebase for my MSc thesis project. The project is organized into several folders, but this README will focus on the `pricer` and `neural_network` folders.
@@ -43,10 +51,3 @@ Make sure to install the required dependencies before running the scripts. You c
 ```bash
 pip install -r requirements.txt
 ```
-
-## TODO:
-
-- ***Model from scratch***: using TensorFlow 2.0 available capabilities
-- Cleaning pricer module, remove redundant calculations (e.g. for KI barriers use the Call/Put and KO pricers)
-- Implement parent level greek calculations
-- Actually creating the requirements.txt for reproduction
