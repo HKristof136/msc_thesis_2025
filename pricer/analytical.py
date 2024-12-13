@@ -27,6 +27,37 @@ class BlackScholesCall(BlackScholes):
         return self.underlier * norm.cdf(d1) - self.strike * np.exp(
             -self.r * self.term
         ) * norm.cdf(d2)
+    def delta(self):
+        d1 = (
+            np.log(self.underlier / self.strike)
+            + (self.r + 0.5 * self.sigma**2) * self.term
+        ) / (self.sigma * np.sqrt(self.term))
+        return norm.cdf(d1)
+    def gamma(self):
+        d1 = (
+            np.log(self.underlier / self.strike)
+            + (self.r + 0.5 * self.sigma**2) * self.term
+        ) / (self.sigma * np.sqrt(self.term))
+        return norm.pdf(d1) / (self.underlier * self.sigma * np.sqrt(self.term))
+    def vega(self):
+        d1 = (
+            np.log(self.underlier / self.strike)
+            + (self.r + 0.5 * self.sigma**2) * self.term
+        ) / (self.sigma * np.sqrt(self.term))
+        return self.underlier * norm.pdf(d1) * np.sqrt(self.term)
+    def theta(self):
+        d1 = (
+            np.log(self.underlier / self.strike)
+            + (self.r + 0.5 * self.sigma**2) * self.term
+        ) / (self.sigma * np.sqrt(self.term))
+        d2 = d1 - self.sigma * np.sqrt(self.term)
+        return (-self.underlier * norm.pdf(d1) * self.sigma / (2 * np.sqrt(self.term)) - self.r * self.strike * np.exp(-self.r * self.term) * norm.cdf(d2))
+    def rho(self):
+        d2 = (
+            np.log(self.underlier / self.strike)
+            + (self.r - 0.5 * self.sigma**2) * self.term
+        ) / (self.sigma * np.sqrt(self.term))
+        return self.strike * self.term * np.exp(-self.r * self.term) * norm.cdf(d2)
 
 
 class BlackScholesPut(BlackScholes):
@@ -39,6 +70,37 @@ class BlackScholesPut(BlackScholes):
         return self.strike * np.exp(-self.r * self.term) * norm.cdf(
             -d2
         ) - self.underlier * norm.cdf(-d1)
+    def delta(self):
+        d1 = (
+            np.log(self.underlier / self.strike)
+            + (self.r + 0.5 * self.sigma**2) * self.term
+        ) / (self.sigma * np.sqrt(self.term))
+        return norm.cdf(d1) - 1
+    def gamma(self):
+        d1 = (
+            np.log(self.underlier / self.strike)
+            + (self.r + 0.5 * self.sigma**2) * self.term
+        ) / (self.sigma * np.sqrt(self.term))
+        return norm.pdf(d1) / (self.underlier * self.sigma * np.sqrt(self.term))
+    def vega(self):
+        d1 = (
+            np.log(self.underlier / self.strike)
+            + (self.r + 0.5 * self.sigma**2) * self.term
+        ) / (self.sigma * np.sqrt(self.term))
+        return self.underlier * norm.pdf(d1) * np.sqrt(self.term) / 100
+    def theta(self):
+        d1 = (
+            np.log(self.underlier / self.strike)
+            + (self.r + 0.5 * self.sigma**2) * self.term
+        ) / (self.sigma * np.sqrt(self.term))
+        d2 = d1 - self.sigma * np.sqrt(self.term)
+        return (-self.underlier * norm.pdf(d1) * self.sigma / (2 * np.sqrt(self.term)) + self.r * self.strike * np.exp(-self.r * self.term) * norm.cdf(-d2)) / 365
+    def rho(self):
+        d2 = (
+            np.log(self.underlier / self.strike)
+            + (self.r - 0.5 * self.sigma**2) * self.term
+        ) / (self.sigma * np.sqrt(self.term))
+        return -self.strike * self.term * np.exp(-self.r * self.term) * norm.cdf(-d2) / 100
 
 
 class Barrier(BlackScholes):
@@ -196,6 +258,18 @@ class BarrierUpAndOutCall(Barrier):
             price_vector = np.nan_to_num(price_vector, nan=0)
             return price_vector
         return price_vector if self.underlier < self.barrier else 0
+
+    def delta(self, precision=0.01):
+        s_up = self.underlier + precision
+        s_down = self.underlier - precision
+        
+        price_up = BarrierUpAndOutCall(
+            s_up, self.strike, self.term, self.r, self.sigma, self.barrier
+        ).price()
+        price_down = BarrierUpAndOutCall(
+            s_down, self.strike, self.term, self.r, self.sigma, self.barrier
+        ).price()
+        return (price_up - price_down) / (2 * precision)
 
 
 class BarrierUpAndOutPut(Barrier):
