@@ -13,3 +13,7 @@ todo
 *.tex
 
 tex_project/*
+playground/*
+.launch_jupyter.bat
+
+neural_network/playground.ipynb

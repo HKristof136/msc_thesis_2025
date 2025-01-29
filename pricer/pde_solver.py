@@ -4,391 +4,303 @@ import os
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 import numpy as np
-from scipy.linalg import lu_factor, lu_solve
-from scipy.interpolate import RegularGridInterpolator
-from tqdm import tqdm
+from pricer.config_base import BlackScholesConfig, PDESolverConfig, DefaultConfig
 from pricer.analytical import BlackScholesCall, BlackScholesPut
+from pricer.pde_solver_base import CrankNicolsonPDESolver, BarrierUpPDE, BarrierDownPDE, AmericanBarrierUpPDE, \
+    AmericanBarrierDownPDE, AmericanOptionPDE
 
-class CrankNicolsonPDESolver:
-    underlier_lower_boundary = lambda self: np.zeros(self.t.shape[1])
-    underlier_upper_boundary = lambda self: np.zeros(self.t.shape[1])
-    payoff = lambda self: np.zeros(self.x.shape[0])
-    backward_step = lambda self, x, i: np.zeros(x.shape[0])
-
-    def __init__(self, config: dict):
-        self.solved = False
-        self.config = config
-        self.verbose = config.get("verbose", True)
-        self.term = np.max(config["t"])
-        self.strike = config["strike"]
-        self.r = config["r"]
-        self.sigma = config["sigma"]
-
-        self.t, self.x = np.meshgrid(self.config["t"], self.config["x"])
-
-        self.grid = np.zeros(self.x.shape)
-        self.grid[0, :] = self.underlier_lower_boundary()
-        self.grid[-1, :] = self.underlier_upper_boundary()
-        self.grid[:, -1] = self.payoff()
-
-    def solve(self):
-        if self.solved:
-            print("Already solved")
-            return None
-        dt = self.config["t"][1] - self.config["t"][0]
-
-        calc_A = True
-        A = np.zeros((self.config["x"].shape[0], self.config["x"].shape[0]))
-        B = np.zeros((self.config["x"].shape[0], self.config["x"].shape[0]))
-
-        iterator = tqdm(range(-2, -self.t.shape[1] - 1, -1)) if self.verbose else range(-2, -self.t.shape[1] - 1, -1)
-
-        for i in iterator:
-            if calc_A:
-                for j in range(1, self.x.shape[0] - 1):
-                    a_j = 0.25 * dt * (self.sigma**2 * j**2 - self.r * j)
-                    b_j = -0.5 * dt * (self.sigma**2 * j**2 + self.r)
-                    c_j = 0.25 * dt * (self.sigma**2 * j**2 + self.r * j)
-
-                    A[j, j - 1 : j + 2] = [-a_j, 1 - b_j, -c_j]
-                    B[j, j - 1 : j + 2] = [a_j, 1 + b_j, c_j]
-
-                a_1 = B[1, 0]
-                c_m_1 = B[-2, -1]
-                A = A[1:-1, 1:-1]
-                B = B[1:-1, 1:-1]
-                lu_A, piv_A = lu_factor(A)
-                calc_A = False
-
-            b = B @ self.grid[1:-1, i + 1].copy().reshape(-1, 1)
-
-            b[0] += a_1 * (self.grid[0, i] + self.grid[0, i + 1])
-            b[-1] += c_m_1 * (self.grid[-1, i] + self.grid[-1, i + 1])
-            self.grid[1:-1, i] = lu_solve((lu_A, piv_A), b).flatten()
-
-            self.grid[:, i] = self.backward_step(self.grid[:, i], i)
-            
-        self.solved = True
-
-    def price(self, points):
-        if not isinstance(points, np.ndarray):
-            points = np.array(points)
-        if not self.solved:
-            self.solve()
-        interp_func = RegularGridInterpolator(
-            (self.config["x"], self.config["t"]), self.grid, method="linear"
-        )
-        interp_points = np.column_stack([points[:, 0], self.term - points[:, 1]])
-        return interp_func(interp_points)
 
 class BlackScholesCallPDE(CrankNicolsonPDESolver):
-    underlier_lower_boundary = lambda self: 0
-    underlier_upper_boundary = lambda self: np.maximum(self.x[-1, :] - np.exp(-self.r * (np.max(self.term) - self.t[-1, :])) * self.strike, 0)
-    payoff = lambda self: np.maximum(self.x[:, -1] - self.strike, 0)
-    backward_step = lambda self, x, i: x
+    underlier_lower_boundary = lambda self: 0.0
+    underlier_upper_boundary = lambda self: np.maximum(
+        self.x[-1, :]
+        - np.exp(-self.r * (np.max(self.max_t) - self.t[-1, :])) * self.strike,
+        0.0,
+    )
+    payoff = lambda self: np.maximum(self.x[:, -1] - self.strike, 0.0)
+
 
 class BlackScholesPutPDE(CrankNicolsonPDESolver):
-    underlier_lower_boundary = lambda self: np.exp(-self.r * (np.max(self.term) - self.t[-1, :])) * self.strike
-    underlier_upper_boundary = lambda self: 0
-    payoff = lambda self: np.maximum(self.strike - self.x[:, -1], 0)
-    backward_step = lambda self, x, i: x
-    
-    def delta(self, points):
-        shift = 0.01
+    underlier_lower_boundary = (
+        lambda self: np.exp(-self.r * (np.max(self.max_t) - self.t[-1, :]))
+        * self.strike
+    )
+    underlier_upper_boundary = lambda self: 0.0
+    payoff = lambda self: np.maximum(self.strike - self.x[:, -1], 0.0)
 
-        if not isinstance(points, np.ndarray):
-            points = np.array(points)
-        
-        down_shift_points = points.copy()
-        down_shift_points[:, 0] -= shift
-        up_shift_points = points.copy()
-        up_shift_points[:, 0] += shift
 
-        price_down = self.price(down_shift_points)
-        price_up = self.price(up_shift_points)
-
-        return (price_up - price_down) / (2 * shift)
-
-class AmericanBlackScholesPutPDE(BlackScholesPutPDE):
+class AmericanBlackScholesPutPDE(AmericanOptionPDE):
     underlier_lower_boundary = lambda self: self.strike
-    backward_step = lambda self, x, i: np.maximum(self.strike - self.x[:, i], x)
+    underlier_upper_boundary = lambda self: 0.0
+    payoff = lambda self: np.maximum(self.strike - self.x[:, -1], 0.0)
 
-class BarrierUpPDE(CrankNicolsonPDESolver):
-    def __init__(self, config):
-        self.barrier = config["barrier"]
-        super().__init__(config)
-    
-    def solve(self):
-        if self.solved:
-            print("Already solved")
-            return None
-        dt = self.config["t"][1] - self.config["t"][0]
-
-        calc_A = True
-
-        reduced_j = np.max(np.nonzero(self.config["x"] < self.barrier)) + 2
-        reduced_scope = self.config["x"][:reduced_j]
-        A = np.zeros((reduced_scope.shape[0], reduced_scope.shape[0]))
-        B = np.zeros((reduced_scope.shape[0], reduced_scope.shape[0]))
-
-        iterator = tqdm(range(-2, -self.t.shape[1] - 1, -1)) if self.verbose else range(-2, -self.t.shape[1] - 1, -1)
-
-        for i in iterator:
-            if calc_A:
-                for j in range(1, reduced_scope.shape[0] - 1):
-                    a_j = 0.25 * dt * (self.sigma**2 * j**2 - self.r * j)
-                    b_j = -0.5 * dt * (self.sigma**2 * j**2 + self.r)
-                    c_j = 0.25 * dt * (self.sigma**2 * j**2 + self.r * j)
-
-                    A[j, j - 1 : j + 2] = [-a_j, 1 - b_j, -c_j]
-                    B[j, j - 1 : j + 2] = [a_j, 1 + b_j, c_j]
-
-                a_1 = B[1, 0]
-                c_m_1 = B[-2, -1]
-                A = A[1:-1, 1:-1]
-                B = B[1:-1, 1:-1]
-                lu_A, piv_A = lu_factor(A)
-                calc_A = False
-
-            b = B @ self.grid[1:reduced_j-1, i + 1].copy().reshape(-1, 1)
-
-            b[0] += a_1 * (self.grid[0, i] + self.grid[0, i + 1])
-            b[-1] += c_m_1 * (self.grid[reduced_j-1, i] + self.grid[reduced_j-1, i + 1])
-            self.grid[1:reduced_j-1, i] = lu_solve((lu_A, piv_A), b).flatten()
-
-            self.grid[:, i] = self.backward_step(self.grid[:, i], i)
-            
-        self.solved = True
 
 class BarrierUpAndOutCallPDE(BarrierUpPDE):
     underlier_lower_boundary = lambda self: 0
     underlier_upper_boundary = lambda self: 0
-    payoff = lambda self: np.maximum(self.x[:, -1] - self.strike, 0) * (self.x[:, -1] < self.barrier)
-    backward_step = lambda self, x, i: x * (self.x[:, i] < self.barrier)
+    payoff = lambda self: np.maximum(self.x[:, -1] - self.strike, 0) * (
+        self.x[:, -1] < self.barrier
+    )
 
-    def __init__(self, config):
-        self.barrier = config["barrier"]
+    def __init__(self, config: PDESolverConfig = DefaultConfig.pde_solver_barrier_call):
         super().__init__(config)
-
-class AmericanBarrierUpAndOutCallPDE(BarrierUpAndOutCallPDE):
-    backward_step = lambda self, x, i: np.maximum(self.x[:, i] - self.strike, x * (self.x[:, i] < self.barrier)) * (self.x[:, i] < self.barrier)
 
 class BarrierUpAndOutPutPDE(BarrierUpPDE):
-    underlier_lower_boundary = lambda self: np.exp(-self.r * (np.max(self.term) - self.t[-1, :])) * self.strike
+    underlier_lower_boundary = (
+        lambda self: np.exp(-self.r * (np.max(self.max_t) - self.t[-1, :]))
+        * self.strike
+    )
     underlier_upper_boundary = lambda self: 0
-    payoff = lambda self: np.maximum(self.strike - self.x[:, -1], 0) * (self.x[:, -1] < self.barrier)
-    backward_step = lambda self, x, i: x * (self.x[:, i] < self.barrier)
+    payoff = lambda self: np.maximum(self.strike - self.x[:, -1], 0) * (
+        self.x[:, -1] < self.barrier
+    )
 
-    def __init__(self, config):
-        self.barrier = config["barrier"]
+    def __init__(self, config: PDESolverConfig = DefaultConfig.pde_solver_barrier_put):
         super().__init__(config)
-
-class AmericanBarrierUpAndOutPutPDE(BarrierUpAndOutPutPDE):
-    underlier_lower_boundary = lambda self: self.strike
-    backward_step = lambda self, x, i: np.maximum(self.strike - self.x[:, i], x * (self.x[:, i] < self.barrier)) * (self.x[:, i] < self.barrier)
 
 class BarrierUpAndInCallPDE(BarrierUpPDE):
-    underlier_lower_boundary = lambda self: 0
-    underlier_upper_boundary = lambda self: np.maximum(self.x[-1, :] - np.exp(-self.r * (np.max(self.term) - self.t[-1, :])) * self.strike, 0)
-    payoff = lambda self: np.maximum(self.x[:, -1] - self.strike, 0) * (self.x[:, -1] > self.barrier)
-    backward_step = lambda self, x, i: x * (self.x[:, i] <= self.barrier) + self.call_grid[:, i] * (self.x[:, i] > self.barrier)
-
-    def __init__(self, config):
-        self.barrier = config["barrier"]
+    def __init__(self, config: PDESolverConfig = DefaultConfig.pde_solver_barrier_call):
         super().__init__(config)
 
-        self.call_grid = BlackScholesCall(
+    def solve(self):
+        if self.solved:
+            print("Already solved")
+            return None
+
+        call_config = BlackScholesConfig(
             underlier_price=self.x,
-            strike=np.ones_like(self.x) * self.strike,
-            expiry=np.max(self.term) - self.t,
-            interest_rate=np.ones_like(self.x) * self.r,
-            volatility=np.ones_like(self.x) * self.sigma
-        ).price()
-        knock_in_ind = np.max(np.nonzero(self.config["x"] < self.barrier)) + 2
-        self.grid[knock_in_ind-1, :] = self.call_grid[knock_in_ind-1, :]
+            strike=self.strike,
+            expiry=self.max_t - self.t,
+            interest_rate=self.r,
+            volatility=self.sigma,
+        )
+        call_grid = BlackScholesCall(call_config).price()
 
-    # def solve(self):
-    #     if self.solved:
-    #         print("Already solved")
-    #         return None
-    #     dt = self.config["t"][1] - self.config["t"][0]
+        ko_grid_cls = BarrierUpAndOutCallPDE(self.config)
+        ko_grid_cls.solve()
 
-    #     calc_A = True
+        self.grid = call_grid - ko_grid_cls.grid
+        self.solved = True
 
-    #     reduced_j = np.max(np.nonzero(self.config["x"] < self.barrier)) + 2
-    #     self.grid[reduced_j-1, :] = self.call_grid[reduced_j-1, :]
-
-    #     reduced_scope = self.config["x"][:reduced_j]
-    #     A = np.zeros((reduced_scope.shape[0], reduced_scope.shape[0]))
-    #     B = np.zeros((reduced_scope.shape[0], reduced_scope.shape[0]))
-
-    #     iterator = tqdm(range(-2, -self.t.shape[1] - 1, -1)) if self.verbose else range(-2, -self.t.shape[1] - 1, -1)
-
-    #     for i in iterator:
-    #         if calc_A:
-    #             for j in range(1, reduced_scope.shape[0] - 1):
-    #                 a_j = 0.25 * dt * (self.sigma**2 * j**2 - self.r * j)
-    #                 b_j = -0.5 * dt * (self.sigma**2 * j**2 + self.r)
-    #                 c_j = 0.25 * dt * (self.sigma**2 * j**2 + self.r * j)
-
-    #                 A[j, j - 1 : j + 2] = [-a_j, 1 - b_j, -c_j]
-    #                 B[j, j - 1 : j + 2] = [a_j, 1 + b_j, c_j]
-
-    #             a_1 = B[1, 0]
-    #             c_m_1 = B[-2, -1]
-    #             A = A[1:-1, 1:-1]
-    #             B = B[1:-1, 1:-1]
-    #             lu_A, piv_A = lu_factor(A)
-    #             calc_A = False
-
-    #         b = B @ self.grid[1:reduced_j-1, i + 1].copy().reshape(-1, 1)
-
-    #         b[0] += a_1 * (self.grid[0, i] + self.grid[0, i + 1])
-    #         b[-1] += c_m_1 * (self.grid[reduced_j - 1, i] + self.grid[reduced_j - 1, i + 1])
-    #         self.grid[1:reduced_j-1, i] = lu_solve((lu_A, piv_A), b).flatten()
-
-    #         self.grid[:, i] = self.backward_step(self.grid[:, i], i)
-            
-    #     self.solved = True
-
-class AmericanBarrierUpAndInCallPDE(BarrierUpAndInCallPDE):
-    underlier_upper_boundary = lambda self: np.maximum(self.x[-1, :] - self.strike, 0)
-    backward_step = lambda self, x, i: x * (self.x[:, i] <= self.barrier) + np.maximum(self.x[:, i] - self.strike,
-                                                                            self.call_grid[:, i] * (self.x[:, i] > self.barrier)
-                                                                            ) * (self.x[:, i] > self.barrier)
 
 class BarrierUpAndInPutPDE(BarrierUpPDE):
-    underlier_lower_boundary = lambda self: 0
-    underlier_upper_boundary = lambda self: 0
-    payoff = lambda self: np.maximum(self.strike - self.x[:, -1], 0) * (self.x[:, -1] > self.barrier)
-    backward_step = lambda self, x, i: x * (self.x[:, i] <= self.barrier) + self.put_grid[:, i] * (self.x[:, i] > self.barrier)
-
-    def __init__(self, config):
-        self.barrier = config["barrier"]
+    def __init__(self, config: PDESolverConfig = DefaultConfig.pde_solver_barrier_put):
         super().__init__(config)
 
-        self.put_grid = BlackScholesPut(
-            underlier_price=self.x,
-            strike=np.ones_like(self.x) * self.strike,
-            expiry=np.max(self.term) - self.t,
-            interest_rate=np.ones_like(self.x) * self.r,
-            volatility=np.ones_like(self.x) * self.sigma
-        ).price()
-        knock_in_ind = np.max(np.nonzero(self.config["x"] < self.barrier)) + 2
-        self.grid[knock_in_ind-1, :] = self.put_grid[knock_in_ind-1, :]
-
-class AmericanBarrierUpAndInPutPDE(BarrierUpAndInPutPDE):
-    def __init__(self, config):
-        super().__init__(config)
-
-        put_grid_cls = AmericanBlackScholesPutPDE(config)
-        put_grid_cls.solve()
-        self.put_grid = put_grid_cls.grid
-
-class BarrierDownPDE(CrankNicolsonPDESolver):
-    def __init__(self, config):
-        self.barrier = config["barrier"]
-        super().__init__(config)
-    
     def solve(self):
-        pass
+        if self.solved:
+            print("Already solved")
+            return None
 
-class BarrierDownAndOutCallPDE(CrankNicolsonPDESolver):
+        put_config = BlackScholesConfig(
+            underlier_price=self.x,
+            strike=self.strike,
+            expiry=self.max_t - self.t,
+            interest_rate=self.r,
+            volatility=self.sigma,
+        )
+        put_grid = BlackScholesPut(put_config).price()
+
+        ko_grid_cls = BarrierUpAndOutPutPDE(self.config)
+        ko_grid_cls.solve()
+
+        self.grid = put_grid - ko_grid_cls.grid
+        self.solved = True
+
+
+class BarrierDownAndOutCallPDE(BarrierDownPDE):
     underlier_lower_boundary = lambda self: 0
-    underlier_upper_boundary = lambda self: np.maximum(self.x[-1, :] - np.exp(-self.r * (np.max(self.term) - self.t[-1, :])) * self.strike, 0)
-    payoff = lambda self: np.maximum(self.x[:, -1] - self.strike, 0) * (self.x[:, -1] > self.barrier)
-    backward_step = lambda self, x, i: x * (self.x[:, i] > self.barrier)
+    underlier_upper_boundary = lambda self: np.maximum(
+        self.x[-1, :]
+        - np.exp(-self.r * (np.max(self.max_t) - self.t[-1, :])) * self.strike,
+        0,
+    )
+    payoff = lambda self: np.maximum(self.x[:, -1] - self.strike, 0) * (
+        self.x[:, -1] > self.barrier
+    )
 
-    def __init__(self, config):
-        self.barrier = config["barrier"]
+    def __init__(self, config: PDESolverConfig = DefaultConfig.pde_solver_barrier_call):
         super().__init__(config)
 
-class AmericanBarrierDownAndOutCallPDE(BarrierDownAndOutCallPDE):
+
+class BarrierDownAndOutPutPDE(BarrierDownPDE):
+    underlier_lower_boundary = lambda self: 0
+    underlier_upper_boundary = lambda self: 0
+    payoff = lambda self: np.maximum(self.strike - self.x[:, -1], 0) * (
+            self.x[:, -1] > self.barrier
+    )
+
+    def __init__(self, config: PDESolverConfig = DefaultConfig.pde_solver_barrier_put):
+        super().__init__(config)
+
+
+class BarrierDownAndInCallPDE(BarrierDownPDE):
+    def __init__(self, config: PDESolverConfig = DefaultConfig.pde_solver_barrier_call):
+        super().__init__(config)
+
+    def solve(self):
+        if self.solved:
+            print("Already solved")
+            return None
+
+        call_config = BlackScholesConfig(
+            underlier_price=self.x,
+            strike=self.strike,
+            expiry=self.max_t - self.t,
+            interest_rate=self.r,
+            volatility=self.sigma,
+        )
+        call_grid = BlackScholesCall(call_config).price()
+
+        ko_grid_cls = BarrierDownAndOutCallPDE(self.config)
+        ko_grid_cls.solve()
+
+        self.grid = call_grid - ko_grid_cls.grid
+        self.solved = True
+
+
+class BarrierDownAndInPutPDE(BarrierDownPDE):
+    def __init__(self, config: PDESolverConfig = DefaultConfig.pde_solver_barrier_put):
+        super().__init__(config)
+
+    def solve(self):
+        if self.solved:
+            print("Already solved")
+            return None
+
+        put_config = BlackScholesConfig(
+            underlier_price=self.x,
+            strike=self.strike,
+            expiry=self.max_t - self.t,
+            interest_rate=self.r,
+            volatility=self.sigma,
+        )
+        put_grid = BlackScholesPut(put_config).price()
+
+        ko_grid_cls = BarrierDownAndOutPutPDE(self.config)
+        ko_grid_cls.solve()
+
+        self.grid = put_grid - ko_grid_cls.grid
+        self.solved = True
+
+
+class AmericanBarrierUpAndOutCallPDE(AmericanBarrierUpPDE):
+    underlier_lower_boundary = lambda self: 0.0
+    underlier_upper_boundary = lambda self: 0.0
+    payoff = lambda self: np.maximum(self.x[:, -1] - self.strike, 0.0) * (
+        self.x[:, -1] < self.barrier
+    )
+
+class AmericanBarrierUpAndOutPutPDE(AmericanBarrierUpPDE):
+    underlier_lower_boundary = lambda self: self.strike
+    underlier_upper_boundary = lambda self: 0.0
+    payoff = lambda self: np.maximum(self.strike - self.x[:, -1], 0.0) * (
+        self.x[:, -1] < self.barrier
+    )
+
+
+class AmericanBarrierUpAndInCallPDE(AmericanBarrierUpPDE):
+    underlier_lower_boundary = lambda self: 0
     underlier_upper_boundary = lambda self: np.maximum(self.x[-1, :] - self.strike, 0)
-    backward_step = lambda self, x, i: np.maximum(self.x[:, i] - self.strike, self.x[:, i] * (self.x[:, i] > self.barrier)) * (self.x[:, i] > self.barrier)
+    payoff = lambda self: np.maximum(self.x[:, -1] - self.strike, 0) * (
+        self.x[:, -1] > self.barrier
+    )
 
-class BarrierDownAndOutPutPDE(CrankNicolsonPDESolver):
-    underlier_lower_boundary = lambda self: 0
-    underlier_upper_boundary = lambda self: 0
-    payoff = lambda self: np.maximum(self.strike - self.x[:, -1], 0) * (self.x[:, -1] > self.barrier)
-    backward_step = lambda self, x, i: x * (self.x[:, i] > self.barrier)
-
-    def __init__(self, config):
-        self.barrier = config["barrier"]
+    def __init__(self, config: PDESolverConfig = DefaultConfig.pde_solver_barrier_call):
         super().__init__(config)
+        reduced_j = np.min(np.nonzero(self.config.underlier_price_grid >= self.barrier))
 
-class AmericanBarrierDownAndOutPutPDE(BarrierDownAndOutPutPDE):
-    backward_step = lambda self, x, i: np.maximum(self.strike - self.x[:, i], x * (self.x[:, i] > self.barrier)) * (self.x[:, i] > self.barrier)
+        call_config = BlackScholesConfig(
+            underlier_price=self.x[reduced_j:, :],
+            strike=self.strike,
+            expiry=self.max_t - self.t[reduced_j:, :],
+            interest_rate=self.r,
+            volatility=self.sigma,
+        )
+        self.grid[reduced_j:, :] = BlackScholesCall(call_config).price()
 
-class BarrierDownAndInCallPDE(CrankNicolsonPDESolver):
-    underlier_lower_boundary = lambda self: 0
-    underlier_upper_boundary = lambda self: 0
-    payoff = lambda self: np.maximum(self.x[:, -1] - self.strike, 0) * (self.x[:, -1] < self.barrier)
-    backward_step = lambda self, x, i: x * (self.x[:, i] >= self.barrier) + self.call_grid[:, i] * (self.x[:, i] < self.barrier)
+        call_config = BlackScholesConfig(
+            underlier_price=self.barrier,
+            strike=self.strike,
+            expiry=self.max_t - self.t[0, :],
+            interest_rate=self.r,
+            volatility=self.sigma,
+        )
+        self.f = BlackScholesCall(call_config).price()
 
-    def __init__(self, config):
-        self.barrier = config["barrier"]
+
+class AmericanBarrierUpAndInPutPDE(AmericanBarrierUpPDE):
+    underlier_lower_boundary = lambda self: 0.0
+    underlier_upper_boundary = lambda self: 0.0
+    payoff = lambda self: np.maximum(self.strike - self.x[:, -1], 0.0) * (
+        self.x[:, -1] > self.barrier
+    )
+
+    def __init__(self, config: PDESolverConfig = DefaultConfig.pde_solver_barrier_put):
         super().__init__(config)
+        reduced_j = np.min(np.nonzero(self.config.underlier_price_grid >= self.barrier))
 
-        self.call_grid = BlackScholesCall(
-            underlier_price=self.x,
-            strike=np.ones_like(self.x) * self.strike,
-            expiry=np.max(self.term) - self.t,
-            interest_rate=np.ones_like(self.x) * self.r,
-            volatility=np.ones_like(self.x) * self.sigma
-        ).price()
-
-class AmericanBarrierDownAndInCallPDE(BarrierDownAndInCallPDE):
-    backward_step = lambda self, x, i: x * (self.x[:, i] >= self.barrier) + np.maximum(self.x[:, i] - self.strike,
-                                                                            self.call_grid[:, i] * (self.x[:, i] < self.barrier)
-                                                                            ) * (self.x[:, i] < self.barrier)
-
-class BarrierDownAndInPutPDE(CrankNicolsonPDESolver):
-    underlier_lower_boundary = lambda self: np.exp(-self.r * (np.max(self.term) - self.t[-1, :])) * self.strike
-    underlier_upper_boundary = lambda self: 0
-    payoff = lambda self: np.maximum(self.strike - self.x[:, -1], 0) * (self.x[:, -1] < self.barrier)
-    backward_step = lambda self, x, i: x * (self.x[:, i] >= self.barrier) + self.put_grid[:, i] * (self.x[:, i] < self.barrier)
-
-    def __init__(self, config):
-        self.barrier = config["barrier"]
-        super().__init__(config)
-
-        self.put_grid = BlackScholesPut(
-            underlier_price=self.x,
-            strike=np.ones_like(self.x) * self.strike,
-            expiry=np.max(self.term) - self.t,
-            interest_rate=np.ones_like(self.x) * self.r,
-            volatility=np.ones_like(self.x) * self.sigma
-        ).price()
-
-class AmericanBarrierDownAndInPutPDE(BarrierDownAndInPutPDE):
-    def __init__(self, config):
-        super().__init__(config)
-
-        put_grid_cls = AmericanBlackScholesPutPDE(config)
+        put_grid_cls = AmericanBlackScholesPutPDE(self.config)
         put_grid_cls.solve()
-        self.put_grid = put_grid_cls.grid
+        self.grid[reduced_j:, :] = put_grid_cls.grid[reduced_j:, :]
+        self.f = put_grid_cls.price([[self.barrier, self.max_t - t] for t in self.t[0, :]])
 
-if __name__ == "__main__":
-    # config = {
-    #     "x": np.linspace(0, 200, 10),
-    #     "t": np.linspace(0, 1, 1001),
-    #     "strike": 100,
-    #     "r": 0.05,
-    #     "sigma": 0.2,
-    #     "barrier": 150,
-    # }
 
-    config = {
-    "x": np.linspace(0, 200, 50),
-    "t": np.linspace(0, 1, 100),
-    "strike": 100,
-    "r": 0.05,
-    "sigma": 0.2,
-    "barrier": 180
-}
+class AmericanBarrierDownAndOutCallPDE(AmericanBarrierDownPDE):
+    underlier_lower_boundary = lambda self: 0.0
+    underlier_upper_boundary = lambda self: np.maximum(self.x[-1, :] - self.strike, 0)
+    payoff = lambda self: np.maximum(self.x[:, -1] - self.strike, 0.0) * (
+            self.x[:, -1] < self.barrier
+    )
 
-    cls_to_test = BarrierUpAndOutCallPDE
-    solver = cls_to_test(config)
-    solver.solve()
-    print(solver.price([[36, 1]]))
+class AmericanBarrierDownAndOutPutPDE(AmericanBarrierDownPDE):
+    underlier_lower_boundary = lambda self: 0.0
+    underlier_upper_boundary = lambda self: 0.0
+    payoff = lambda self: np.maximum(self.strike - self.x[:, -1], 0.0) * (
+            self.x[:, -1] < self.barrier
+    )
+
+class AmericanBarrierDownAndInCallPDE(AmericanBarrierDownPDE):
+    underlier_lower_boundary = lambda self: 0.0
+    underlier_upper_boundary = lambda self: 0.0
+    payoff = lambda self: np.maximum(self.x[:, -1] - self.strike, 0.0) * (
+        self.x[:, -1] < self.barrier
+    )
+    def __init__(self, config: PDESolverConfig = DefaultConfig.pde_solver_barrier_call):
+        super().__init__(config)
+        reduced_j = np.max(np.nonzero(self.config.underlier_price_grid <= self.barrier))
+
+        call_config = BlackScholesConfig(
+            underlier_price=self.x[:reduced_j, :],
+            strike=self.strike,
+            expiry=self.max_t - self.t[:reduced_j, :],
+            interest_rate=self.r,
+            volatility=self.sigma,
+        )
+        self.grid[:reduced_j, :] = BlackScholesCall(call_config).price()
+
+        call_config = BlackScholesConfig(
+            underlier_price=self.barrier,
+            strike=self.strike,
+            expiry=self.max_t - self.t[0, :],
+            interest_rate=self.r,
+            volatility=self.sigma,
+        )
+        self.f = BlackScholesCall(call_config).price()
+
+
+class AmericanBarrierDownAndInPutPDE(AmericanBarrierDownPDE):
+    underlier_lower_boundary = lambda self: self.strike
+    underlier_upper_boundary = lambda self: 0.0
+    payoff = lambda self: np.maximum(self.strike - self.x[:, -1], 0.0) * (
+        self.x[:, -1] < self.barrier
+    )
+
+    def __init__(self, config: PDESolverConfig = DefaultConfig.pde_solver_barrier_call):
+        super().__init__(config)
+        reduced_j = np.max(np.nonzero(self.config.underlier_price_grid <= self.barrier))
+
+        put_grid_cls = AmericanBlackScholesPutPDE(self.config)
+        put_grid_cls.solve()
+        self.grid[:reduced_j, :] = put_grid_cls.grid[:reduced_j, :]
+        self.f = put_grid_cls.price([[self.barrier, self.max_t - t] for t in self.t[0, :]])
