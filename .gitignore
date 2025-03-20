@@ -17,3 +17,7 @@ playground/*
 .launch_jupyter.bat
 
 neural_network/playground.ipynb
+data/*
+.idea/
+figures/
+

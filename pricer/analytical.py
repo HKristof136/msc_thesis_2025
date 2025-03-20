@@ -1,10 +1,14 @@
+from scipy.integrate import quad
 from scipy.stats import norm
 import numpy as np
 from abc import ABC, abstractmethod
-from pricer.config_base import BlackScholesConfig, DefaultConfig
+from pricer.config_base import BlackScholesConfig, HestonConfig, DefaultConfig
 
 
 class BlackScholes(ABC):
+    type = "analytical"
+    input_names = ["underlier_price", "strike", "expiry", "interest_rate", "volatility"]
+
     def __init__(self, config: BlackScholesConfig = DefaultConfig.black_scholes):
         self.config = config
 
@@ -102,9 +106,10 @@ class BlackScholesCall(BlackScholes):
             + (self.r + 0.5 * self.sigma**2) * self.term
         ) / (self.sigma * np.sqrt(self.term))
         d2 = d1 - self.sigma * np.sqrt(self.term)
-        return -self.underlier * norm.pdf(d1) * self.sigma / (
-            2 * np.sqrt(self.term)
-        ) - self.r * self.strike * np.exp(-self.r * self.term) * norm.cdf(d2)
+        return (-1) * (
+            -self.underlier * norm.pdf(d1) * self.sigma / (2 * np.sqrt(self.term))
+            - self.r * self.strike * np.exp(-self.r * self.term) * norm.cdf(d2)
+        )
 
     def rho(self, precision=0.0):
         d2 = (
@@ -144,30 +149,38 @@ class BlackScholesPut(BlackScholes):
             np.log(self.underlier / self.strike)
             + (self.r + 0.5 * self.sigma**2) * self.term
         ) / (self.sigma * np.sqrt(self.term))
-        return self.underlier * norm.pdf(d1) * np.sqrt(self.term) / 100
+        return self.underlier * norm.pdf(d1) * np.sqrt(self.term)
 
     def theta(self, precision=0.0):
-        d1 = (
-            np.log(self.underlier / self.strike)
-            + (self.r + 0.5 * self.sigma**2) * self.term
-        ) / (self.sigma * np.sqrt(self.term))
-        d2 = d1 - self.sigma * np.sqrt(self.term)
-        return (
-            -self.underlier * norm.pdf(d1) * self.sigma / (2 * np.sqrt(self.term))
-            + self.r * self.strike * np.exp(-self.r * self.term) * norm.cdf(-d2)
-        ) / 365
+        # d1 = (
+        #     np.log(self.underlier / self.strike)
+        #     + (self.r + 0.5 * self.sigma**2) * self.term
+        # ) / (self.sigma * np.sqrt(self.term))
+        # d2 = d1 - self.sigma * np.sqrt(self.term)
+        # return (-1) * (
+        #     -self.underlier * norm.pdf(d1) * self.sigma / (2 * np.sqrt(self.term))
+        #     + self.r * self.strike * np.exp(-self.r * self.term) * norm.cdf(d2)
+        # )
+        return super().theta(precision=0.0001)
 
     def rho(self, precision=0.0):
         d2 = (
             np.log(self.underlier / self.strike)
             + (self.r - 0.5 * self.sigma**2) * self.term
         ) / (self.sigma * np.sqrt(self.term))
-        return (
-            -self.strike * self.term * np.exp(-self.r * self.term) * norm.cdf(-d2) / 100
-        )
+        return -self.strike * self.term * np.exp(-self.r * self.term) * norm.cdf(-d2)
 
 
 class Barrier(BlackScholes):
+    input_names = [
+        "underlier_price",
+        "strike",
+        "expiry",
+        "interest_rate",
+        "volatility",
+        "barrier",
+    ]
+
     def __init__(
         self,
         config: BlackScholesConfig = DefaultConfig.black_scholes_barrier_call,
@@ -206,7 +219,7 @@ class Barrier(BlackScholes):
 
         component_map = {}
 
-        lambd, d1, d2, d3, d4  = self._compute_parameters()
+        lambd, d1, d2, d3, d4 = self._compute_parameters()
 
         if 1 in index:
             a1 = self.call_fl * self.underlier * norm.cdf(
@@ -253,24 +266,23 @@ class Barrier(BlackScholes):
     def price(self):
         pass
 
+
 class BarrierUpAndOutCall(Barrier):
     def __init__(
         self,
         config: BlackScholesConfig = DefaultConfig.black_scholes_barrier_call,
     ):
-        super().__init__(
-            config
-        )
+        super().__init__(config)
         self.call_fl = 1
         self.down_fl = -1
 
     def price(self):
         component_map = self._compute_pricing_components([1, 2, 3, 4])
         price_vector = (
-                component_map["a1"]
-                - component_map["a2"]
-                + component_map["a3"]
-                - component_map["a4"]
+            component_map["a1"]
+            - component_map["a2"]
+            + component_map["a3"]
+            - component_map["a4"]
         )
         if isinstance(price_vector, np.ndarray):
             price_vector[self.underlier >= self.barrier] = 0.0
@@ -288,9 +300,7 @@ class BarrierUpAndOutPut(Barrier):
         self,
         config: BlackScholesConfig = DefaultConfig.black_scholes_barrier_put,
     ):
-        super().__init__(
-            config
-        )
+        super().__init__(config)
         self.call_fl = -1
         self.down_fl = -1
 
@@ -313,9 +323,7 @@ class BarrierUpAndInCall(Barrier):
         self,
         config: BlackScholesConfig = DefaultConfig.black_scholes_barrier_call,
     ):
-        super().__init__(
-            config
-        )
+        super().__init__(config)
 
     def price(self):
         ko_price = BarrierUpAndOutCall(self.config).price()
@@ -328,23 +336,20 @@ class BarrierUpAndInPut(Barrier):
         self,
         config: BlackScholesConfig = DefaultConfig.black_scholes_barrier_put,
     ):
-        super().__init__(
-            config
-        )
+        super().__init__(config)
 
     def price(self):
         ko_price = BarrierUpAndOutPut(self.config).price()
         put_price = BlackScholesPut(self.config).price()
         return put_price - ko_price
 
+
 class BarrierDownAndOutCall(Barrier):
     def __init__(
         self,
         config: BlackScholesConfig = DefaultConfig.black_scholes_barrier_call,
     ):
-        super().__init__(
-            config
-        )
+        super().__init__(config)
         self.call_fl = 1
         self.down_fl = 1
 
@@ -367,9 +372,7 @@ class BarrierDownAndOutPut(Barrier):
         self,
         config: BlackScholesConfig = DefaultConfig.black_scholes_barrier_put,
     ):
-        super().__init__(
-            config
-        )
+        super().__init__(config)
         self.call_fl = -1
         self.down_fl = 1
 
@@ -397,9 +400,7 @@ class BarrierDownAndInCall(Barrier):
         self,
         config: BlackScholesConfig = DefaultConfig.black_scholes_barrier_call,
     ):
-        super().__init__(
-            config
-        )
+        super().__init__(config)
         self.call_fl = 1
         self.down_fl = 1
 
@@ -415,9 +416,7 @@ class BarrierDownAndInPut(Barrier):
         self,
         config: BlackScholesConfig = DefaultConfig.black_scholes_barrier_put,
     ):
-        super().__init__(
-            config
-        )
+        super().__init__(config)
         self.call_fl = -1
         self.down_fl = 1
 
@@ -426,3 +425,121 @@ class BarrierDownAndInPut(Barrier):
         put_price = BlackScholesPut(self.config).price()
 
         return put_price - ko_price
+
+class Heston(ABC):
+    type = "analytical"
+    input_names = ["underlier_price", "strike", "expiry", "interest_rate", "volatility",
+                   "kappa", "theta", "volofvol", "rho"]
+
+    def __init__(self, config: HestonConfig = DefaultConfig.heston):
+        self.config = config
+
+        self.underlier = config.underlier_price
+        self.strike = config.strike
+        self.term = config.expiry
+        self.r = config.interest_rate
+        self.sigma = config.volatility
+        self.k = config.kappa
+        self.o = config.theta
+        self.v = config.volofvol
+        self.corr = config.rho
+
+        self.f = self.underlier * np.exp(self.r * self.term)
+
+    @abstractmethod
+    def price(self):
+        pass
+
+    def _calc_greek(self, greek, order, precision):
+        up_config = HestonConfig(
+            underlier_price=(
+                self.underlier + precision if greek == "delta" else self.underlier
+            ),
+            strike=self.strike,
+            expiry=self.term + precision if greek == "theta" else self.term,
+            interest_rate=self.r + precision if greek == "rho" else self.r,
+            volatility=self.sigma + precision if greek == "vega" else self.sigma,
+            kappa=self.k,
+            theta=self.o,
+            volofvol=self.v,
+            rho=self.corr
+        )
+        price_up = self.__class__(up_config).price()
+
+        down_config = HestonConfig(
+            underlier_price=(
+                self.underlier - precision if greek == "delta" else self.underlier
+            ),
+            strike=self.strike,
+            expiry=self.term - precision if greek == "theta" else self.term,
+            interest_rate=self.r - precision if greek == "rho" else self.r,
+            volatility=self.sigma - precision if greek == "vega" else self.sigma,
+            kappa=self.k,
+            theta=self.o,
+            volofvol=self.v,
+            rho=self.corr
+        )
+        price_down = self.__class__(down_config).price()
+        if order == "first":
+            return (price_up - price_down) / (2 * precision)
+        else:
+            return (price_up - 2 * self.price() + price_down) / precision**2
+
+    def delta(self, precision=0.01):
+        return self._calc_greek("delta", "first", precision)
+
+    def gamma(self, precision=0.01):
+        return self._calc_greek("delta", "second", precision)
+
+    def vega(self, precision=0.001):
+        return self._calc_greek("vega", "first", precision)
+
+    def theta(self, precision=0.001):
+        return self._calc_greek("theta", "first", precision)
+
+    def rho(self, precision=0.001):
+        return self._calc_greek("rho", "first", precision)
+
+class HestonCall(Heston):
+    def price(self):
+        # integral = lambda u, S, K, T, r, sigma: self.f * self.f1(u, S, K, T, r, sigma) - K * self.f2(u, S, K, T, r, sigma)
+        # func = lambda S, K, T, r, sigma: quad(integral, 0, np.inf, args=(S, K, T, r, sigma))[0]
+        # vectorized_func = np.vectorize(func)
+        # integral_value = vectorized_func(self.underlier, self.strike, self.term, self.r, self.sigma)
+        integral_value = quad(lambda u: self.f * self.f1(u) - self.strike * self.f2(u), 0, np.inf)[0]
+        return np.exp(-self.r * self.term) * (
+            0.5 * (self.f - self.strike) + (1 / np.pi) * integral_value
+        )
+
+    def f1(self, u):
+        return np.real(
+            (np.exp(-1j * u * np.log(self.strike)) * self.phi(u - 1j)) / (1j * u * self.f)
+        )
+
+    def f2(self, u):
+        return np.real(
+            (np.exp(-1j * u * np.log(self.strike)) * self.phi(u)) / (1j * u)
+        )
+
+    def phi(self, u):
+        d = ((self.corr * self.v * u * 1j - self.k) ** 2 + 1j * u * self.v ** 2 + self.v ** 2 * u ** 2) ** 0.5
+        c = (self.k - self.corr * self.v * u * 1j  + d) / (self.k - self.corr * self.v * u * 1j - d)
+        C = self.k * self.o / self.v ** 2 * ((self.k - self.corr * self.v * u * 1j + d) * self.term - 2 * np.log((c * np.exp(d * self.term) - 1) / (c - 1)))
+        D = (self.k - self.corr * self.v * u * 1j + d) / self.v ** 2 * ((np.exp(d * self.term) - 1) / (c * np.exp(d * self.term) - 1))
+
+        return np.exp(C + D * self.sigma + 1j * u * np.log(self.f))
+
+    def c_term(self, u, term):
+        _d = ((self.corr * self.v * u * 1j - self.k) ** 2 + 1j * u * self.v ** 2 + self.v ** 2 * u ** 2) ** 0.5
+        _c = (self.k - self.corr * self.v * u * 1j + _d) / (self.k - self.corr * self.v * u * 1j - _d)
+        return ((self.k * self.o) / (self.v ** 2)) * ((self.k - self.corr * self.v * u * 1j + _d) * term - 2 * np.log((_c * np.exp(_d * term) - 1) / (_c - 1)))
+
+    def d_term(self, u, term):
+        _d = ((self.corr * self.v * u * 1j - self.k) ** 2 + 1j * u * self.v ** 2 + self.v ** 2 * u ** 2) ** 0.5
+        _c = (self.k - self.corr * self.v * u * 1j + _d) / (self.k - self.corr * self.v * u * 1j - _d)
+        return ((self.k - self.corr * self.v * u * 1j + _d) / (self.v ** 2)) * ((np.exp(_d * term) - 1) / (_c * np.exp(_d * term) - 1))
+
+if __name__ == "__main__":
+    pricer_cls = HestonCall()
+    price = pricer_cls.price()
+    print("success")

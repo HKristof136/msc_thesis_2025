@@ -3,13 +3,13 @@ import os
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-import datetime
+import torch
 import numpy as np
-import tensorflow as tf
 import pandas as pd
 import matplotlib.pyplot as plt
 
-from model import PricerNet
+from torch_model import PricerNetTorch, PricerDataset
+from torch.utils.data import DataLoader
 from config_base import PipeLineConfig
 
 class Pipeline:
@@ -38,7 +38,8 @@ class Pipeline:
         self.pricing_model = config.pricing_model
         self.input_variables = config.model.input_variables
         self.target_variables = config.model.target_variables
-        self.greek_variables = config.model.tensorflow_greeks
+        self.greek_variables = config.model.greeks
+        self.greek_relative_weight = config.model.greeks_relative_weight
 
         root = os.getcwd()
         for df_type in ["train", "validation", "test"]:
@@ -56,31 +57,18 @@ class Pipeline:
 
             if os.path.exists(save_path) and not self.regenerate_data:
                 data = pd.read_parquet(save_path)
-                data = data.sample(frac=1, random_state=config.train_data.seed).reset_index(drop=True)
 
                 setattr(self, f"{df_type}_data", data)
-                setattr(self, f"{df_type}_input_data", data[self.input_variables].astype(np.float64))
-                setattr(self, f"{df_type}_target", data[list(self.target_variables)].astype(np.float64))
-                setattr(self, f"{df_type}_greeks", data[list(self.greek_variables.keys())].astype(np.float64))
-                if getattr(self, f"{df_type}_greeks").empty:
-                    data_tuple = (
-                        getattr(self, f"{df_type}_input_data").values,
-                        getattr(self, f"{df_type}_target").values
-                    )
-                else:
-                    data_tuple = (
-                        getattr(self, f"{df_type}_input_data").values,
-                        getattr(self, f"{df_type}_target").values,
-                        getattr(self, f"{df_type}_greeks").values
-                    )
-
-                setattr(self, f"{df_type}_dataset", tf.data.Dataset.from_tensor_slices(
-                    data_tuple
-                ).batch(self.config.model.batch_size))
+                dataset = PricerDataset(data,
+                                        self.input_variables,
+                                        self.target_variables,
+                                        list(self.greek_variables.keys()))
+                setattr(self, f"{df_type}_dataset", DataLoader(dataset,
+                                                               batch_size=config.model.batch_size,
+                                                               shuffle=True)
+                        )
             else:
-                setattr(self, f"{df_type}_input_data", None)
-                setattr(self, f"{df_type}_target", None)
-                setattr(self, f"{df_type}_greeks", None)
+                setattr(self, f"{df_type}_data", None)
                 setattr(self, f"{df_type}_dataset", None)
 
     def build_model(self):
@@ -89,62 +77,17 @@ class Pipeline:
         neuron_number = config.neuron_per_layer
         layer_number = config.layer_number
         hidden_layer_activation = config.hidden_layer_activation
-        initializer = tf.keras.initializers.GlorotNormal(seed=self.config.train_data.seed)
 
-        input_layer = tf.keras.layers.Input(shape=(self.train_input_data.shape[1],))
-
-        i = 1
-        hidden_layer = tf.keras.layers.Dense(neuron_number,
-                                             activation=hidden_layer_activation,
-                                             kernel_initializer=initializer)(
-            input_layer
-        )
-
-        dropout_pct = config.dropout
-        if dropout_pct:
-            hidden_layer = tf.keras.layers.Dropout(config.dropout)(
-                hidden_layer
-            )
-
-        while i != layer_number:
-            hidden_layer = tf.keras.layers.Dense(
-                neuron_number,
-                activation=hidden_layer_activation,
-                kernel_initializer=initializer,
-                bias_initializer=initializer,
-                kernel_regularizer=tf.keras.regularizers.L1L2(
-                    l1=config.l1, l2=config.l2
-                ),
-            )(hidden_layer)
-            if dropout_pct:
-                hidden_layer = tf.keras.layers.Dropout(config.dropout)(
-                    hidden_layer
-                )
-            i += 1
-
-        output_layer = tf.keras.layers.Dense(
-            1, activation="relu",
-            kernel_initializer=initializer,
-            bias_initializer=initializer,
-        )(hidden_layer)
-
-        if model_cls == PricerNet:
-            model = model_cls(
-                    config.tensorflow_greeks,
-                    config.greeks_relative_weight,
-                    inputs=input_layer,
-                    outputs=output_layer,
-                )
-        else:
-            model = model_cls(
-                inputs=input_layer, outputs=output_layer
-            )
-        optimizer = config.optimizer
-
-        model.compile(
-            optimizer=optimizer(learning_rate=config.learning_rate), loss="mse",
-        )
-
+        runtime_config_dict = {
+            "input_size": len(self.input_variables),
+            "output_size": len(self.target_variables),
+            "layer_number": layer_number,
+            "neuron_per_layer": neuron_number,
+            "activation_function": hidden_layer_activation,
+            "learning_rate": config.learning_rate,
+            "Z_loss_weight": config.greeks_relative_weight
+        }
+        model = model_cls(runtime_config_dict)
         return model
 
     def create_datasets(self):
@@ -153,45 +96,25 @@ class Pipeline:
                 # TODO: include seed in naming
                 data_generator = self.config.__dict__[f"{df_type}_data"]
                 data = data_generator.get_data()
-                data = data.sample(frac=1,
-                                   random_state=self.config.train_data.seed).reset_index(drop=True)
                 data.to_parquet(getattr(self, f"{df_type}_save_path"), index=False)
-                setattr(self, f"{df_type}_data", data)
-                setattr(self, f"{df_type}_input_data", data[self.input_variables].astype(np.float64))
-                setattr(self, f"{df_type}_target", data[list(self.target_variables)].astype(np.float64))
-                setattr(self, f"{df_type}_greeks", data[list(self.greek_variables.keys())].astype(np.float64))
 
-                if getattr(self, f"{df_type}_greeks").empty:
-                    data_tuple = (
-                        getattr(self, f"{df_type}_input_data").values,
-                        getattr(self, f"{df_type}_target").values
-                    )
-                else:
-                    data_tuple = (
-                        getattr(self, f"{df_type}_input_data").values,
-                        getattr(self, f"{df_type}_target").values,
-                        getattr(self, f"{df_type}_greeks").values
-                    )
-                dataset = tf.data.Dataset.from_tensor_slices(
-                    data_tuple
-                ).batch(self.config.model.batch_size)
-                setattr(self, f"{df_type}_dataset", dataset)
+                setattr(self, f"{df_type}_data", data)
+                dataset = PricerDataset(data,
+                                        self.input_variables,
+                                        self.target_variables,
+                                        list(self.greek_variables.keys()))
+
+                setattr(self, f"{df_type}_dataset", DataLoader(dataset,
+                                                               batch_size=self.config.model.batch_size,
+                                                               shuffle=True)
+                        )
 
     def train(self):
         self.create_datasets()
         if not self.model:
             self.model = self.build_model()
-            print(self.model.summary())
-
-            log_dir = "logs/fit/" + datetime.date.today().strftime("%Y%m%d") + "_" + self.pricing_model.__name__
-            tensorboard_callback = tf.keras.callbacks.TensorBoard(log_dir=log_dir, histogram_freq=1)
-
-            self.model.fit(
-                self.train_dataset,
-                epochs=self.config.model.epochs,
-                batch_size=self.config.model.batch_size,
-                callbacks=[tensorboard_callback]
-            )
+            self.model.train_model(self.train_dataset, self.config.model.epochs,
+                                   pd_metadata=self.greek_variables)
 
     def evaluate(self):
         self.train_data.loc[:, "in_sample"] = True
@@ -200,48 +123,41 @@ class Pipeline:
 
         calc_batch_size = self.config.model.jacobian_batch_size
         for i in range(concat_data.shape[0] // calc_batch_size + 1):
-            input_data = tf.Variable(
-                concat_data[self.input_variables][
-                    i * calc_batch_size : (i + 1) * calc_batch_size
-                ],
-                dtype=tf.float64,
+            input_data = torch.tensor(
+                concat_data[self.config.model.input_variables][i * calc_batch_size : (i + 1) * calc_batch_size].values,
+                dtype=torch.float32
             )
-            if input_data.shape[0] == 0:
-                continue
-            with tf.GradientTape(persistent=True) as tape:
-                tape.watch(input_data)
-                model_preds = self.model(input_data)
-
-            calc_greeks = dict()
-            calc_greeks["first"] = tape.batch_jacobian(model_preds, input_data)
-            calc_greeks["second"] = tape.batch_jacobian(calc_greeks["first"][:, 0, :], input_data)
-
-            del tape
-
+            input_data.requires_grad = True
+            model_price = self.model(input_data)
             concat_data.loc[
-                i * calc_batch_size : (i + 1) * calc_batch_size - 1,
-                [f"model_{variable}" for variable in self.target_variables],
-            ] = model_preds.numpy()
+            i * calc_batch_size: (i + 1) * calc_batch_size - 1,
+            [f"model_{variable}" for variable in self.target_variables],
+            ] = model_price.detach().numpy()
 
-            for variable, greek_dict in self.config.model.greeks.items():
-                for greek in greek_dict:
-                    concat_data.loc[
+            gradients = torch.autograd.grad(outputs=model_price, inputs=input_data,
+                                            grad_outputs=torch.ones_like(model_price),
+                                            create_graph=True)[0]
+
+            for greek_name, (ad_i, _) in self.greek_variables.items():
+                concat_data.loc[
                         i * calc_batch_size : (i + 1) * calc_batch_size - 1,
-                        f"model_{greek['name']}_AD",
-                    ] = calc_greeks[greek["order"]][:, 0, self.input_variables.index(variable)].numpy()
+                        f"model_{greek_name}_AD",
+                    ] = gradients[:, ad_i].detach().numpy()
 
         output_dict = {"neuron_per_layer": self.config.model.neuron_per_layer,
                        "layer_number": self.config.model.layer_number}
         in_sample_mask = concat_data["in_sample"]
         out_sample_mask = ~concat_data["in_sample"]
-        for variable in ["price", "delta", "gamma", "vega", "theta", "rho"]:
+        for variable in self.config.model.target_variables + list(self.greek_variables.keys()):
             col_name =  f"model_{variable + '_AD' if variable != 'price' else variable}"
-            output_dict[f"in_sample_{variable}_mse"] = tf.keras.losses.MSE(concat_data.loc[in_sample_mask, variable],
-                                                  concat_data.loc[in_sample_mask, col_name]).numpy()
-            output_dict[f"out_sample_{variable}_mse"] = tf.keras.losses.MSE(concat_data.loc[out_sample_mask, variable],
-                                                    concat_data.loc[out_sample_mask, col_name]).numpy()
+            output_dict[f"in_sample_{variable}_mse"] = np.mean(
+                (concat_data.loc[in_sample_mask, variable].values - concat_data.loc[in_sample_mask, col_name]) ** 2
+            )
+            output_dict[f"out_sample_{variable}_mse"] = np.mean(
+                (concat_data.loc[out_sample_mask, variable].values - concat_data.loc[out_sample_mask, col_name]) ** 2
+            )
 
-        for variable in ["price", "delta", "vega", "rho", "theta"]:
+        for variable in self.config.model.target_variables + list(self.greek_variables.keys()):
             fig, ax = plt.subplots(2, 2, figsize=(10, 10))
 
             ax[0][0].scatter(concat_data.loc[in_sample_mask, variable],
@@ -282,15 +198,15 @@ class Pipeline:
         fig, ax = plt.subplots(5, 2, figsize=(20, 25))
 
         test_case_df = pd.DataFrame(
-            np.linspace(self.test_data["underlier_price"].min(), self.test_data["underlier_price"].max(), 100),
+            np.linspace(self.test_data["underlier_price"].min(), self.test_data["underlier_price"].max(), 1001),
             columns=["underlier_price"]
         )
         test_case_df["interest_rate"] = self.train_data["interest_rate"].mean()
         test_case_df["volatility"] = self.train_data["volatility"].mean()
         test_case_df["strike"] = self.train_data["strike"].mean()
         if "barrier" in self.config.pricing_model.input_names:
-            test_case_df["underlier_price"] = np.linspace(self.test_data["underlier_price"].min(), self.train_data["barrier"].mean(), 100)
-            test_case_df["underlier_price_grid"] = np.linspace(0.0, self.train_data["barrier"].mean() * 1.1, 100)
+            test_case_df["underlier_price"] = np.linspace(self.test_data["underlier_price"].min(), self.train_data["barrier"].mean(), 1001)
+            test_case_df["underlier_price_grid"] = np.linspace(0.0, self.train_data["barrier"].mean() * 1.1, 1001)
             test_case_df["barrier"] = self.train_data["barrier"].mean()
 
         colors = ["k", "r", "b", "g", "c"]
@@ -334,7 +250,9 @@ class Pipeline:
                 test_case_df["theta"] = pricing_instance.theta(points)
                 test_case_df["rho"] = pricing_instance.rho(points)
 
-            test_case_df["model_price"] = self.model.predict(test_case_df[self.input_variables].values)
+            test_case_df["model_price"] = self.model(
+                torch.tensor(test_case_df[self.input_variables].values, dtype=torch.float32)
+            ).detach().numpy()
 
             ax[0][0].plot(test_case_df["underlier_price"], test_case_df["price"],
                        label=f"price, expiry={t:0.2f}",
@@ -352,37 +270,36 @@ class Pipeline:
                          color=colors[i], alpha=0.3, label=f"price error, expiry={t:0.2f}")
             ax[0][1].legend()
 
-            input_data = tf.Variable(
-                test_case_df[self.input_variables].values,
-                dtype=tf.float64,
+            input_data = torch.tensor(
+                test_case_df[self.input_variables].values, dtype=torch.float32
             )
-            with tf.GradientTape() as tape:
-                tape.watch(input_data)
-                model_preds = self.model(input_data)
-            test_case_greeks = tape.batch_jacobian(model_preds, input_data)
-            for j, (variable, greek_dict) in enumerate(self.config.model.greeks.items()):
-                for greek in greek_dict:
-                    if greek["name"] not in test_case_df:
-                        continue
-                    test_case_df.loc[
-                        :,
-                        f"model_{greek['name']}_AD",
-                    ] = test_case_greeks[:, 0, self.input_variables.index(variable)].numpy()
-                    ax[j+1][0].plot(test_case_df["underlier_price"], test_case_df[greek["name"]],
-                               label=greek['name'] + f", expiry={t:0.2f}",
-                               color=colors[i])
-                    ax[j+1][0].plot(test_case_df["underlier_price"], test_case_df[f"model_{greek['name']}_AD"],
-                               label=greek['name'] + " from AD" + f", expiry={t:0.2f}",
-                               color=colors[i], linestyle="--")
-                    ax[j+1][0].set_title(greek['name'])
-                    ax[j+1][0].set_xlabel("Moneyness")
-                    ax[j+1][0].set_ylabel(greek['name'])
-                    ax[j+1][0].legend()
+            input_data.requires_grad = True
+            test_case_price = self.model(input_data)
+            test_case_gradients = torch.autograd.grad(outputs=test_case_price, inputs=input_data,
+                                            grad_outputs=torch.ones_like(test_case_price),
+                                            create_graph=True)[0]
 
-                    ax[j+1][1].bar(test_case_df["underlier_price"], test_case_df[greek["name"]] - test_case_df[f"model_{greek['name']}_AD"],
-                                   width=0.001,
-                                   color=colors[i], alpha=0.3, label=f"{greek['name']} error, expiry={t:0.2f}")
-                    ax[j+1][1].legend()
+            for j, (greek_name, (ad_i, _)) in enumerate(self.greek_variables.items()):
+                test_case_df.loc[
+                    :,
+                    f"model_{greek_name}_AD",
+                ] = test_case_gradients[:, ad_i].detach().numpy()
+                ax[j+1][0].plot(test_case_df["underlier_price"], test_case_df[greek_name],
+                           label=greek_name + f", expiry={t:0.2f}",
+                           color=colors[i])
+                ax[j+1][0].plot(test_case_df["underlier_price"], test_case_df[f"model_{greek_name}_AD"],
+                           label=greek_name + " from AD" + f", expiry={t:0.2f}",
+                           color=colors[i], linestyle="--")
+                ax[j+1][0].set_title(greek_name)
+                ax[j+1][0].set_xlabel("Moneyness")
+                ax[j+1][0].set_ylabel(greek_name)
+                ax[j+1][0].legend()
+
+                ax[j+1][1].bar(test_case_df["underlier_price"],
+                               test_case_df[greek_name] - test_case_df[f"model_{greek_name}_AD"],
+                               width=0.001,
+                               color=colors[i], alpha=0.3, label=f"{greek_name} error, expiry={t:0.2f}")
+                ax[j+1][1].legend()
 
         plt.tight_layout()
         plt.savefig(f"figures/{self.pricing_model.__name__}_slicing_plot_{self.config.model.neuron_per_layer}_{self.config.model.layer_number}_{self.config.model.hidden_layer_activation}.png")
@@ -395,7 +312,7 @@ if __name__ == "__main__":
 
     df_list = []
     for neuron_number, layer_number, activation_function, seed in [
-        (32, 10, "tanh", 20250317),
+        (100, 10, "leaky_relu", 20250320),
         # (32, 4),
         ]:
         # run_config = pipeline_configs["bs_uo_call"]

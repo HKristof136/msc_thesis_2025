@@ -1,48 +1,7 @@
 from dataclasses import dataclass
 from typing import Optional, Any
-import numpy as np
+from data_generator.data_generator_base import DataGenerator
 
-# @dataclass
-# class DataGenConfig:
-#     variables: list[str]
-#     parameter_variables: list[str]
-#     underlier_price_range: np.ndarray[Any, np.dtype[np.floating]]
-#     expiry_time_range: np.ndarray[Any, np.dtype[np.floating]]
-#     interest_rate: np.ndarray[Any, np.dtype[np.floating]]
-#     volatility: np.ndarray[Any, np.dtype[np.floating]]
-#     strike: Optional[np.ndarray[Any, np.dtype[np.floating]]] = None
-#     derived_variables: Optional[dict[str, callable]] = None
-#     normalize: bool = True
-#     n: int = 10 ** 6 # number of observations
-#     m: Optional[int] = 10 ** 4 # number of pricing instances
-#     x_step: Optional[int] = None
-#     t_step: Optional[int] = None
-#     seed: Optional[int] = 42
-#     price_points_sampling_std_pct: Optional[float] = None
-
-@dataclass
-class DataGenConfig:
-    variables: list[str]
-    underlier_price: np.ndarray[Any, np.dtype[np.floating]]
-    expiry: np.ndarray[Any, np.dtype[np.floating]]
-    interest_rate: np.ndarray[Any, np.dtype[np.floating]]
-    volatility: np.ndarray[Any, np.dtype[np.floating]]
-    strike: Optional[np.ndarray[Any, np.dtype[np.floating]]] = None
-    derived_variables: Optional[dict[str, callable]] = None
-    normalize: bool = True
-    n: int = 10 ** 6 # number of observations
-    m: Optional[int] = 10 ** 4 # number of pricing instances
-    x_step: Optional[int] = None
-    t_step: Optional[int] = None
-    seed: Optional[int] = 42
-    price_points_sampling_std_pct: Optional[float] = None
-    strike_lower_bound_pct: Optional[float] = 0.75
-    strike_upper_bound_pct: Optional[float] = 1.25
-    strike_sampling_std_pct: Optional[float] = 0.15
-    parameter_variables: Optional[list[str]] = None
-    barrier_distance_mean_pct: Optional[float] = 1.4
-    barrier_sampling_std_pct: Optional[float] = 1.1
-    barrier_distance_min_pct: Optional[float] = 0.15
 
 @dataclass
 class ModelConfig:
@@ -58,18 +17,19 @@ class ModelConfig:
     l2: float
     dropout: float
     input_variables: list[str]
-    target_variables: dict[str, str]
-    greeks: dict[str, list[dict[str, str]]]
-    tensorflow_greeks: dict[str, int]
+    target_variables: list[str]
+    greeks: dict[str, tuple[str]]
+    greeks_relative_weight: float
     jacobian_batch_size: int
 
 @dataclass
 class PipeLineConfig:
     pricing_model: Any
-    data_gen_func: callable
-    data: DataGenConfig
-    test_data: DataGenConfig
+    train_data: DataGenerator
+    validation_data: DataGenerator
+    test_data: DataGenerator
     model: ModelConfig
     regenerate_data: bool
-    save_path: Optional[str] = None
+    train_save_path: Optional[str] = None
+    validation_save_path: Optional[str] = None
     test_save_path: Optional[str] = None
