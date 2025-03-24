@@ -22,9 +22,9 @@ common_model_config = ModelConfig(
         neuron_per_layer=32,
         layer_number=5,
         hidden_layer_activation="tanh",
-        learning_rate=0.03,
-        batch_size=2 ** 10,
-        epochs=5,
+        learning_rate=0.05,
+        batch_size=2 ** 11,
+        epochs=10,
         optimizer="SGD",
         l1=0.0,
         l2=0.0,
@@ -37,7 +37,7 @@ common_model_config = ModelConfig(
             'vega': (2, 2),
             'rho': (3, 3)
         },
-        greeks_relative_weight=0.25,
+        greeks_relative_weight=10,
         jacobian_batch_size=5 * 10 ** 4,
     )
 
@@ -46,16 +46,21 @@ common_barrier_config = ModelConfig(
         neuron_per_layer=32,
         layer_number=5,
         hidden_layer_activation="tanh",
-        learning_rate=0.03,
-        batch_size=2 ** 14,
+        learning_rate=0.1,
+        batch_size=2 ** 10,
         epochs=10,
         optimizer="SGD",
         l1=0.0,
         l2=0.0,
-        dropout=0.05,
+        dropout=0.0,
         input_variables=["underlier_price", "interest_rate", "volatility", "expiry", "barrier"],
-        target_variables={"price": "relu"},
-        greeks={'delta': (0, 0), 'theta': (1, 1), 'vega': (2, 2), 'rho': (3, 3)},
+        target_variables=["price"],
+        greeks={
+            'delta': (0, 0),
+            'theta': (1, 1),
+            'vega': (2, 2),
+            'rho': (3, 3)
+        },
         greeks_relative_weight=0.05,
         jacobian_batch_size=5 * 10 ** 4,
     )
@@ -151,9 +156,9 @@ bs_put_pipeline_config = PipeLineConfig(
     pricing_model=BlackScholesPut,
     train_data=DataGenerator(
         DataGeneratorConfig(
-            pricer=BlackScholesCall,
+            pricer=BlackScholesPut,
             pricer_config=BlackScholesConfig,
-            n=5 * 10 ** 6,
+            n=10 ** 6,
             m=1,
             parameter_variables=[
                 VariableConfig("strike", distribution="uniform", lower_bound=1.0, upper_bound=1.0),
@@ -162,7 +167,7 @@ bs_put_pipeline_config = PipeLineConfig(
                 VariableConfig("expiry", distribution="uniform", lower_bound=1 / 365, upper_bound=1.0),
             ],
             additional_variables=[
-                VariableConfig("underlier_price", distribution="normal", lower_clip=0.6, upper_clip=1.4, std=0.025,
+                VariableConfig("underlier_price", distribution="normal", lower_clip=0.1, upper_clip=1.9, std=0.05,
                                mean_override="discounted_strike"),
             ],
             derived_variables=[
@@ -178,7 +183,7 @@ bs_put_pipeline_config = PipeLineConfig(
     ),
     validation_data=DataGenerator(
         DataGeneratorConfig(
-            pricer=BlackScholesCall,
+            pricer=BlackScholesPut,
             pricer_config=BlackScholesConfig,
             n=10 ** 6,
             m=1,
@@ -189,7 +194,7 @@ bs_put_pipeline_config = PipeLineConfig(
                 VariableConfig("expiry", distribution="uniform", lower_bound=1 / 365, upper_bound=1.0),
             ],
             additional_variables=[
-                VariableConfig("underlier_price", distribution="normal", lower_clip=0.6, upper_clip=1.4, std=0.025,
+                VariableConfig("underlier_price", distribution="normal", lower_clip=0.1, upper_clip=1.9, std=0.05,
                                mean_override="discounted_strike"),
             ],
             derived_variables=[
@@ -205,7 +210,7 @@ bs_put_pipeline_config = PipeLineConfig(
     ),
     test_data=DataGenerator(
         DataGeneratorConfig(
-            pricer=BlackScholesCall,
+            pricer=BlackScholesPut,
             pricer_config=BlackScholesConfig,
             n=10 ** 6,
             m=1,
@@ -216,7 +221,7 @@ bs_put_pipeline_config = PipeLineConfig(
                 VariableConfig("expiry", distribution="uniform", lower_bound=14 / 365, upper_bound=300 / 365),
             ],
             additional_variables=[
-                VariableConfig("underlier_price", distribution="normal", lower_clip=0.75, upper_clip=1.25, std=0.025,
+                VariableConfig("underlier_price", distribution="normal", lower_clip=0.25, upper_clip=1.75, std=0.05,
                                mean_override="discounted_strike"),
             ],
             derived_variables=[
@@ -240,8 +245,8 @@ bs_uo_call_pipeline_config = PipeLineConfig(
         DataGeneratorConfig(
             pricer=BarrierUpAndOutCallPDE,
             pricer_config=PDESolverConfig,
-            n=5 * 10 ** 4,
-            m=10 ** 2,
+            n=10 ** 5,
+            m=10,
             parameter_variables=[
                 VariableConfig("strike", distribution="uniform", lower_bound=1.0, upper_bound=1.0),
                 VariableConfig("barrier", distribution="uniform", lower_bound=1.1, upper_bound=1.8),
@@ -290,8 +295,8 @@ bs_uo_call_pipeline_config = PipeLineConfig(
         DataGeneratorConfig(
             pricer=BarrierUpAndOutCallPDE,
             pricer_config=PDESolverConfig,
-            n=10 ** 4,
-            m=10 ** 2,
+            n=10 ** 5,
+            m=10,
             parameter_variables=[
                 VariableConfig("strike", distribution="uniform", lower_bound=1.0, upper_bound=1.0),
                 VariableConfig("barrier", distribution="uniform", lower_bound=1.2, upper_bound=1.7),

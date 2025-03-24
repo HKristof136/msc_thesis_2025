@@ -34,67 +34,114 @@ class PricerNetTorch(nn.Module):
             elif config['activation_function'] == 'tanh':
                 layers.append(nn.Tanh())
             elif config['activation_function'] == 'leaky_relu':
-                layers.append(nn.LeakyReLU())
+                layers.append(nn.LeakyReLU(negative_slope=0.1))
             input_size = config['neuron_per_layer']
         layers.append(nn.Linear(input_size, config['output_size']))
-        layers.append(nn.ReLU())
+        layers.append(nn.Softplus(beta=2.0))
         self.model = nn.Sequential(*layers)
+        self.model.apply(self._initialize_weights)
 
-        self.optimizer = optim.SGD(self.model.parameters(), lr=config['learning_rate'])
+        # self.optimizer = optim.SGD(self.model.parameters(), lr=config['learning_rate'], momentum=0.75)
+        self.optimizer = optim.Adam(self.model.parameters(), lr=config['learning_rate'] / 100)
         self.loss_fn = nn.MSELoss()
 
-        self.Z_loss_weight = config["Z_loss_weight"]
+        self.Z_loss_weight = config["layer_number"] ** 2 # config["Z_loss_weight"]
 
     def forward(self, x):
         return self.model(x)
 
     def train_model(self, data, epochs=10, pd_metadata=None):
         self.model.train()
+        lr = self.config['learning_rate']
         for epoch in range(epochs):
-            if epoch == 2:
-                self.optimizer = optim.Adam(self.model.parameters(), lr=self.config['learning_rate'] / 100)
+            # self.optimizer = optim.SGD(self.model.parameters(), lr=lr, momentum=0.75)
+            max_norm = 0.25
+
+            epoch_overall_losses = []
             epoch_losses = []
             epoch_weighted_pd_losses = []
             epoch_weighted_pd_weights = []
             with tqdm(data, desc=f"Epoch {epoch + 1}/{epochs}", total=len(data)) as pbar:
                 for X, y, Z in pbar:
-                    self.optimizer.zero_grad()
-                    output = self.forward(X)
-                    X_loss = self.loss_fn(output, y)
-                    X_loss.backward()
-                    self.optimizer.step()
-
-                    self.optimizer.zero_grad()
-                    X.requires_grad = True
-                    output = self.forward(X)
-                    gradients = torch.autograd.grad(outputs=output, inputs=X,
-                                                    grad_outputs=torch.ones_like(output),
-                                                    create_graph=True)[0]
                     if Z.numel() > 0:
-                        Z_loss = 0
-                        pd_losses = {}
-                        weighted_pd_losses = {}
-                        weighted_pd_weights = {}
-                        for name, (ad_i, Z_i) in pd_metadata.items():
-                            pd_loss = self.loss_fn(gradients[:, ad_i], Z[:, Z_i])
-                            pd_losses[name] = pd_loss
-                            Z_loss += pd_loss
+                        if epoch == 0:
+                            self.optimizer.zero_grad()
+                            output = self.forward(X)
+                            X_loss = self.loss_fn(output, y)
+                            self.optimizer.zero_grad()
+                            X_loss.backward()
+                            torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=max_norm)
+                            self.optimizer.step()
 
-                        weighted_Z_loss = 0
-                        for name, pd_loss in pd_losses.items():
-                            weight = pd_loss / Z_loss
-                            weighted_pd_loss = weight * pd_loss
-                            weighted_pd_weights[name] = weight
-                            weighted_pd_losses[name] = weighted_pd_loss
-                            weighted_Z_loss += self.Z_loss_weight * weighted_pd_loss
-                        weighted_Z_loss.backward()
-                        self.optimizer.step()
+                            X.requires_grad = True
+                            output = self.forward(X)
+                            gradients = torch.autograd.grad(outputs=output, inputs=X,
+                                                            grad_outputs=torch.ones_like(output),
+                                                            create_graph=True)[0]
+                            Z_loss = 0
+                            pd_losses = {}
+                            weighted_pd_losses = {}
+                            weighted_pd_weights = {}
+                            for name, (ad_i, Z_i) in pd_metadata.items():
+                                pd_loss = self.loss_fn(gradients[:, ad_i], Z[:, Z_i])
+                                pd_losses[name] = pd_loss
+                                Z_loss += pd_loss
 
+                            weighted_Z_loss = 0
+                            for name, pd_loss in pd_losses.items():
+                                weight = (pd_loss / Z_loss)
+                                weighted_pd_loss = weight * pd_loss
+                                weighted_pd_weights[name] = weight
+                                weighted_pd_losses[name] = weighted_pd_loss
+                                weighted_Z_loss += self.Z_loss_weight * weighted_pd_loss
+
+                            overall_loss = X_loss + weighted_Z_loss / self.Z_loss_weight
+
+                        else:
+                            self.optimizer.zero_grad()
+                            X.requires_grad = True
+                            output = self.forward(X)
+                            gradients = torch.autograd.grad(outputs=output, inputs=X,
+                                                            grad_outputs=torch.ones_like(output),
+                                                            create_graph=True)[0]
+                            Z_loss = 0
+                            pd_losses = {}
+                            weighted_pd_losses = {}
+                            weighted_pd_weights = {}
+                            for name, (ad_i, Z_i) in pd_metadata.items():
+                                pd_loss = self.loss_fn(gradients[:, ad_i], Z[:, Z_i])
+                                pd_losses[name] = pd_loss
+                                Z_loss += pd_loss
+
+                            weighted_Z_loss = 0
+                            for name, pd_loss in pd_losses.items():
+                                weight = (pd_loss / Z_loss)
+                                weighted_pd_loss = weight * pd_loss
+                                weighted_pd_weights[name] = weight
+                                weighted_pd_losses[name] = weighted_pd_loss
+                                weighted_Z_loss += self.Z_loss_weight * weighted_pd_loss
+
+                            weighted_Z_loss.backward()
+                            torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=max_norm)
+                            self.optimizer.step()
+
+                            self.optimizer.zero_grad()
+                            output = self.forward(X)
+                            X_loss = self.loss_fn(output, y)
+                            X_loss.backward()
+                            torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=max_norm)
+                            self.optimizer.step()
+
+                            overall_loss = X_loss + weighted_Z_loss / self.Z_loss_weight
+
+                        epoch_overall_losses.append(overall_loss.item())
                         epoch_losses.append(X_loss.item())
-                        epoch_weighted_pd_losses.append({name: loss.item() for name, loss in weighted_pd_losses.items()})
+                        epoch_weighted_pd_losses.append(
+                            {name: loss.item() for name, loss in weighted_pd_losses.items()})
                         epoch_weighted_pd_weights.append(
                             {name: weight.item() for name, weight in weighted_pd_weights.items()})
                         pbar.set_postfix({
+                            'overall_loss': sum(epoch_overall_losses) / len(epoch_overall_losses),
                             'price_loss': sum(epoch_losses) / len(epoch_losses),
                             **{f"{name}_loss": sum([d[name] for d in epoch_weighted_pd_losses]) / len(
                                 epoch_weighted_pd_losses) for name in pd_metadata.keys()},
@@ -102,10 +149,21 @@ class PricerNetTorch(nn.Module):
                                 epoch_weighted_pd_weights) for name in pd_metadata.keys()}
                         })
                     else:
-                        epoch_losses.append(X_loss.item())
+                        self.optimizer.zero_grad()
+                        output = self.forward(X)
+                        loss = self.loss_fn(output, y)
+                        loss.backward()
+                        torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=max_norm)
+                        self.optimizer.step()
+                        epoch_losses.append(loss.item())
                         pbar.set_postfix({
                             'price_loss': sum(epoch_losses) / len(epoch_losses),
                         })
+                    
+    @staticmethod
+    def _initialize_weights(module):
+        if isinstance(module, nn.Linear):
+            nn.init.xavier_uniform_(module.weight)
 
 if __name__ == "__main__":
     import pandas as pd
@@ -133,4 +191,3 @@ if __name__ == "__main__":
                            epochs=10,
                            pd_metadata={'delta': (0, 0), 'theta': (1, 1), 'vega': (2, 2), 'rho': (3, 3)}
                            )
-    print("yes")

@@ -92,7 +92,7 @@ class Pipeline:
 
     def create_datasets(self):
         for df_type in ["train", "validation", "test"]:
-            if getattr(self, f"{df_type}_input_data") is None:
+            if getattr(self, f"{df_type}_data") is None:
                 # TODO: include seed in naming
                 data_generator = self.config.__dict__[f"{df_type}_data"]
                 data = data_generator.get_data()
@@ -312,35 +312,38 @@ if __name__ == "__main__":
 
     df_list = []
     for neuron_number, layer_number, activation_function, seed in [
-        (100, 10, "leaky_relu", 20250320),
-        # (32, 4),
+        (32, 20, "tanh", 20250323),
+        (32, 5, "leaky_relu", 20250323),
+        (32, 10, "tanh", 20250323),
+        (32, 10, "leaky_relu", 20250323),
+        (64, 5, "tanh", 20250323),
+        (64, 5, "leaky_relu", 20250323),
+        (64, 10, "tanh", 20250323),
+        (64, 10, "leaky_relu", 20250323),
         ]:
-        # run_config = pipeline_configs["bs_uo_call"]
-        # run_config.train_data.seed = seed
-        # run_config.model.hidden_layer_activation = activation_function
-        # run_config.model.neuron_per_layer = neuron_number
-        # run_config.model.layer_number = layer_number
-        # s = time.perf_counter()
-        # pipeline = Pipeline(run_config)
-        # pipeline.train()
-        # df_dict = pipeline.evaluate()
+        run_config = pipeline_configs["bs_uo_call"]
+        run_config.train_data.seed = seed
+        run_config.model.hidden_layer_activation = activation_function
+        run_config.model.neuron_per_layer = neuron_number
+        run_config.model.layer_number = layer_number
+        pipeline = Pipeline(run_config)
+        pipeline.train()
+        pipeline.evaluate()
 
-        # run_config = pipeline_configs["bs_put"]
-        # run_config.train_data.seed = seed
-        # run_config.model.hidden_layer_activation = activation_function
-        # run_config.model.neuron_per_layer = neuron_number
-        # run_config.model.layer_number = layer_number
-        # s = time.perf_counter()
-        # pipeline = Pipeline(run_config)
-        # pipeline.train()
-        # df_dict = pipeline.evaluate()
-        #
+        run_config = pipeline_configs["bs_put"]
+        run_config.train_data.seed = seed
+        run_config.model.hidden_layer_activation = activation_function
+        run_config.model.neuron_per_layer = neuron_number
+        run_config.model.layer_number = layer_number
+        pipeline = Pipeline(run_config)
+        pipeline.train()
+        pipeline.evaluate()
+
         run_config = pipeline_configs["bs_call"]
         run_config.train_data.seed = seed
         run_config.model.hidden_layer_activation = activation_function
         run_config.model.neuron_per_layer = neuron_number
         run_config.model.layer_number = layer_number
-        s = time.perf_counter()
         pipeline = Pipeline(run_config)
         pipeline.train()
-        df_dict = pipeline.evaluate()
+        pipeline.evaluate()

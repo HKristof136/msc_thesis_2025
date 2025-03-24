@@ -113,7 +113,7 @@ class DataGenerator:
                                                                                 self.config.derived_variables],
                                        dtype=np.float32)
         if "UpAndOut" in self.config.pricer.__name__:
-            underlier_grid = np.linspace(0, row["barrier"] * 1.1, 101)
+            underlier_grid = np.linspace(0, row["barrier"] * 1.1, 201)
         time_grid = np.linspace(0, row["pricer_expiry"] * 1.1, 101)
         pricer_config_args = {"underlier_price_grid": underlier_grid, "time_grid": time_grid,
                               "verbose": False}
@@ -127,7 +127,7 @@ class DataGenerator:
         pricer.solve()
 
         discounted_strike = pricer.strike * np.exp(-pricer.r * (pricer.max_t - pricer.t))
-        mask = (pricer.x < (pricer.barrier - 0.05)) & (pricer.x > discounted_strike * 0.6)
+        mask = (pricer.x < pricer.barrier) & (pricer.x > discounted_strike * 0.6)
         mask = mask & ((pricer.max_t - pricer.t) < row["pricer_expiry"]) & (
                     (pricer.max_t - pricer.t) >= row["pricer_expiry"] / 2)
         points_x = pricer.x[mask]
