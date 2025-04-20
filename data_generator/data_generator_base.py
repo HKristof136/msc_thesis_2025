@@ -3,13 +3,19 @@ import numpy as np
 import concurrent.futures
 
 from data_generator.config import DataGeneratorConfig, VariableConfig
+from get_logger import get_logger
 from tqdm import tqdm
+
+logger = get_logger()
 
 class DataGenerator:
     def __init__(self, config: DataGeneratorConfig):
         self.config = config
-        self.seed = config.seed
-        self.rng = np.random.default_rng(self.seed)
+        if isinstance(config.seed, int):
+            self.seed = config.seed
+        else:
+            self.seed = hash(config.seed)
+        self.rng = np.random.default_rng(self.seed + (hash(self.config.pricer.__name__) + hash(self.config.data_run_type)) % 314)
 
         self.variables = []
         self.variables += [v.name for v in config.parameter_variables]
@@ -17,8 +23,12 @@ class DataGenerator:
         self.variables += [v.name for v in config.derived_variables]
         self.data = None
 
+        self.feller_condition = config.feller_condition
+
     def generate_variable(self, variable_config: VariableConfig, size,
-                          pricer: None, points=None, mean_override=None):
+                          pricer: None, points=None, mean_override=None, verbose=True):
+        if verbose:
+            logger.info(f"Generating variable: {variable_config.name}")
         if variable_config.generator_function is not None:
             if points is None:
                 return np.round(
@@ -29,6 +39,13 @@ class DataGenerator:
                     variable_config.generator_function(pricer, points), 8
                 ).astype(np.float32)
         if variable_config.distribution == "uniform":
+            if mean_override is not None:
+                return np.round(
+                    self.rng.uniform(
+                        low=mean_override * variable_config.lower_bound,
+                        high=mean_override * variable_config.upper_bound,
+                        size=size), 8
+                ).astype(np.float32)
             return np.round(
                 self.rng.uniform(
                     low=variable_config.lower_bound,
@@ -47,7 +64,7 @@ class DataGenerator:
             values = np.round(
                 self.rng.normal(
                     loc=mean,
-                    scale=variable_config.std,
+                    scale=variable_config.std * mean,
                     size=size),8
             ).astype(np.float32)
             if variable_config.lower_clip is not None:
@@ -60,6 +77,7 @@ class DataGenerator:
 
     def generate_data(self):
         n, m = self.config.n, self.config.m
+        logger.info(f"Generating {n * m} data points, from {n} parameter draws, pricing {m} instances per draw")
         df = pd.DataFrame(index=range(n * m), columns=self.variables, dtype=np.float32)
 
         param_variable_names = [v.name for v in self.config.parameter_variables]
@@ -69,13 +87,50 @@ class DataGenerator:
             dtype=np.float32
         )
         for variable in self.config.parameter_variables:
-            parameter_df.loc[:, variable.name] = self.generate_variable(variable, size=n, pricer=None)
+            if variable.name == "barrier":
+                parameter_df.loc[:, variable.name] = self.generate_variable(variable, size=n, pricer=None,
+                                                                            mean_override=parameter_df["strike"].values)
+            else:
+                parameter_df.loc[:, variable.name] = self.generate_variable(variable, size=n, pricer=None)
+
+        if self.feller_condition:
+            logger.info("Checking Feller condition on parameter_df")
+            parameter_df["feller_condition"] = (2 * parameter_df["kappa"] * parameter_df["variance_theta"] - parameter_df["sigma"] ** 2) > 0
+            parameter_df = parameter_df[parameter_df["feller_condition"]]
+
+            while parameter_df.shape[0] != n:
+                logger.info(f"Feller condition not satisfied for all drawn parameter sets, parameter_df shape: {parameter_df.shape}")
+                temp_parameter_df = pd.DataFrame(
+                    index=range(n),
+                    columns=param_variable_names,
+                    dtype=np.float32
+                )
+                for variable in self.config.parameter_variables:
+                    if variable.name == "barrier":
+                        temp_parameter_df.loc[:, variable.name] = self.generate_variable(variable, size=n, pricer=None,
+                                                                                    mean_override=temp_parameter_df[
+                                                                                        "strike"].values)
+                    else:
+                        temp_parameter_df.loc[:, variable.name] = self.generate_variable(variable, size=n, pricer=None)
+                temp_parameter_df["feller_condition"] = (
+                        2 * temp_parameter_df["kappa"] * temp_parameter_df["variance_theta"] - temp_parameter_df["sigma"] ** 2
+                                                        ) > 0
+                temp_parameter_df = temp_parameter_df[temp_parameter_df["feller_condition"]]
+                temp_parameter_df = temp_parameter_df.sample(
+                    min(temp_parameter_df.shape[0], n - parameter_df.shape[0]),
+                    random_state=self.rng
+                )
+                parameter_df = pd.concat([parameter_df, temp_parameter_df], axis=0)
+            parameter_df = parameter_df.drop(columns=["feller_condition"])
+
+        logger.info(f"Successfully created parameter_df, with shape: {parameter_df.shape}, variables: {list(parameter_df.columns)}")
 
         df.loc[:, [v.name for v in self.config.parameter_variables]] = pd.concat(
             [parameter_df] * m
         ).sort_index().reset_index(drop=True).values
 
         if self.config.pricer.type == "analytical":
+            logger.info("Adding additional_variables")
             for variable in self.config.additional_variables:
                 if variable.mean_override == "discounted_strike":
                     discount_factors = np.exp(
@@ -90,12 +145,26 @@ class DataGenerator:
                 **{v: df[v].values.astype(np.float32) for v in self.config.pricer.input_names}
             )
             pricer = self.config.pricer(pricer_config)
+            logger.info("Adding derived_variables")
             for variable in self.config.derived_variables:
                 df.loc[:, variable.name] = self.generate_variable(variable, size=n * m, pricer=pricer)
         elif self.config.pricer.type == "pde_grid":
+            logger.info("Starting multiprocessing data generation")
             with concurrent.futures.ProcessPoolExecutor() as executor:
                 derived_df_list = list(
-                    tqdm(executor.map(self.process_row,
+                    tqdm(executor.map(self.process_row_cn,
+                                      [row for _, row in parameter_df.iterrows()],
+                                      [m] * n,
+                                      [*parameter_df.index],
+                                      ), total=n))
+            df.loc[:, derived_df_list[0].columns] = pd.concat(
+                derived_df_list
+            ).sort_values("row_ind").values.astype(np.float32)
+        elif self.config.pricer.type == "adi":
+            logger.info("Starting multiprocessing data generation")
+            with concurrent.futures.ProcessPoolExecutor() as executor:
+                derived_df_list = list(
+                    tqdm(executor.map(self.process_row_heston,
                                       [row for _, row in parameter_df.iterrows()],
                                       [m] * n,
                                       [*parameter_df.index],
@@ -105,16 +174,25 @@ class DataGenerator:
             ).sort_values("row_ind").values.astype(np.float32)
         else:
             raise ValueError(f"Unsupported pricer type {self.config.pricer.type}")
+
+        if self.config.implied_volatility:
+            logger.info("Constraint on vega in the dataset for ImpliedVol")
+            df = df.loc[df["vega"] >= 0.1]
+            df["vega"] = 1 / df["vega"]
         self.data = df
 
-    def process_row(self, row, m, row_ind):
+    def process_row_cn(self, row, m, row_ind):
         temp_derived_df = pd.DataFrame(index=range(m),
                                        columns=["underlier_price", "expiry"] + [v.name for v in
                                                                                 self.config.derived_variables],
                                        dtype=np.float32)
-        if "UpAndOut" in self.config.pricer.__name__:
-            underlier_grid = np.linspace(0, row["barrier"] * 1.1, 201)
-        time_grid = np.linspace(0, row["pricer_expiry"] * 1.1, 101)
+        if "Up" in self.config.pricer.__name__:
+            underlier_grid = np.linspace(0.01, row["barrier"] + 0.01, 201)
+        else:
+            ds_grid = np.linspace(0.01, row["barrier"] + 0.01, 201)
+            ds = ds_grid[1] - ds_grid[0]
+            underlier_grid = np.arange(0.01, row["barrier"] * 2, ds)
+        time_grid = np.linspace(0, row["pricer_expiry"] + 0.01, 101)
         pricer_config_args = {"underlier_price_grid": underlier_grid, "time_grid": time_grid,
                               "verbose": False}
         pricer_config_args.update(
@@ -126,19 +204,17 @@ class DataGenerator:
         pricer = self.config.pricer(pricer_config)
         pricer.solve()
 
-        discounted_strike = pricer.strike * np.exp(-pricer.r * (pricer.max_t - pricer.t))
-        mask = (pricer.x < pricer.barrier) & (pricer.x > discounted_strike * 0.6)
-        mask = mask & ((pricer.max_t - pricer.t) < row["pricer_expiry"]) & (
-                    (pricer.max_t - pricer.t) >= row["pricer_expiry"] / 2)
-        points_x = pricer.x[mask]
-        points_t = pricer.t[mask]
-        points_gamma = np.abs(pricer.gamma(np.vstack([points_x, pricer.max_t - points_t]).T))
-        prob_dist = points_gamma / np.sum(points_gamma)
+        mask = (0.01 <= pricer.t) & (pricer.t <= row["pricer_expiry"] / 2)
+        if "Up" in self.config.pricer.__name__:
+            mask = mask & (row["barrier"] * 0.7 <= pricer.x) & (pricer.x <= (row["barrier"] - 0.01))
+        else:
+            mask = mask & ((row["barrier"] + 0.01) <= pricer.x) & (pricer.x <= row["barrier"] * 1.3)
+        points_in_scope = np.maximum(0.0, pricer.grid[mask]).flatten()
 
-        points_ind = np.random.choice(np.arange(points_x.shape[0]), size=m, p=prob_dist)
-        points = np.zeros(shape=(m, 2))
-        points[:, 0] = points_x[points_ind]
-        points[:, 1] = pricer.max_t - points_t[points_ind]
+        points_ind = self.rng.choice(np.arange(points_in_scope.shape[0]), size=m,)
+        points = np.zeros(shape=(m, 2), dtype=np.float32)
+        points[:, 0] = pricer.x[mask].flatten()[points_ind]
+        points[:, 1] = pricer.max_t - pricer.t[mask].flatten()[points_ind]
 
         temp_derived_df.loc[:, "underlier_price"] = points[:, 0]
         temp_derived_df.loc[:, "expiry"] = points[:, 1]
@@ -146,83 +222,71 @@ class DataGenerator:
         for variable in self.config.derived_variables:
             temp_derived_df.loc[:, variable.name] = self.generate_variable(
                 variable, size=m,
-                pricer=pricer, points=points
+                pricer=pricer, points=points, verbose=False
+            )
+        temp_derived_df.loc[:, "row_ind"] = row_ind
+        return temp_derived_df
+
+    def process_row_heston(self, row, m, row_ind):
+        temp_derived_df = pd.DataFrame(
+            index=range(m),
+            columns=["underlier_price", "expiry", "initial_variance"] + [v.name for v in self.config.derived_variables],
+            dtype=np.float32
+        )
+        time_offset = 0.01
+        time_grid = np.linspace(0, row["pricer_expiry"] + time_offset, 51)
+        pricer_config_args = {"underlier_price_grid": np.array([]), "time_grid": time_grid, "verbose": False}
+        pricer_config_args.update(
+            {v: row[v] for v in self.config.pricer.input_names if v not in pricer_config_args}
+        )
+        pricer_config = self.config.pricer_config(
+            **pricer_config_args
+        )
+        pricer = self.config.pricer(pricer_config)
+        pricer.solve()
+
+        if "barrier" not in self.config.pricer.input_names:
+            expiry = time_offset # self.rng.uniform(time_offset, row["pricer_expiry"] / 2, m).astype(np.float32)
+            discounted_strike = pricer.strike * np.exp(-row["interest_rate"] * expiry)
+            underlier_price = np.clip(
+                self.rng.normal(discounted_strike, 0.1 * discounted_strike, m),
+                0.1 * discounted_strike,
+                1.9 * discounted_strike
+            ).astype(np.float32)
+            variance = self.rng.uniform(row["variance_theta"] * 0.75, row["variance_theta"] * 1.25, m).astype(np.float32)
+
+            points = np.zeros(shape=(m, 3))
+            points[:, 0] = variance
+            points[:, 1] = pricer.max_t - expiry
+            points[:, 2] = underlier_price
+        else:
+            mask = (0.01 <= pricer.tt) & (pricer.tt <= row["pricer_expiry"] / 2)
+            mask = mask & (row["barrier"] * 0.75 <= pricer.xx) & (pricer.xx <= (row["barrier"] - 0.01))
+            mask = mask & (pricer.vv >= pricer.th / 2) & (pricer.vv <= pricer.th * 2)
+            points_in_scope = np.maximum(0.0, pricer.grid[mask]).flatten()
+            points_ind = self.rng.choice(np.arange(points_in_scope.shape[0]), size=m,)
+
+            points = np.zeros(shape=(m, 3))
+            points[:, 0] = pricer.vv[mask].flatten()[points_ind]
+            points[:, 1] = pricer.max_t - pricer.tt[mask].flatten()[points_ind]
+            points[:, 2] = pricer.xx[mask].flatten()[points_ind]
+
+        temp_derived_df.loc[:, "initial_variance"] = points[:, 0]
+        temp_derived_df.loc[:, "underlier_price"] = points[:, 2]
+        temp_derived_df.loc[:, "expiry"] = points[:, 1]
+
+        for variable in self.config.derived_variables:
+            temp_derived_df.loc[:, variable.name] = self.generate_variable(
+                variable, size=m,
+                pricer=pricer, points=points, verbose=False
             )
         temp_derived_df.loc[:, "row_ind"] = row_ind
         return temp_derived_df
 
     def get_data(self):
+        logger.info(f"DataGenerator for model: {self.config.pricer.__name__}, run type: {self.config.data_run_type} initialized")
+        logger.info(f"Using seed: {self.seed + (hash(self.config.pricer.__name__) + hash(self.config.data_run_type)) % 314}")
         if self.data is None:
             self.generate_data()
+        logger.info(f"Dataset generated, with shape: {self.data.shape}, with columns: {list(self.data.columns)}")
         return self.data
-
-if __name__ == "__main__":
-    # from pricer.pde_solver import BarrierUpAndOutCallPDE
-    # from pricer.config_base import PDESolverConfig
-    #
-    # config = DataGeneratorConfig(
-    #     pricer=BarrierUpAndOutCallPDE,
-    #     pricer_config=PDESolverConfig,
-    #     n=10**2,
-    #     m=3 * 10**2,
-    #     parameter_variables=[
-    #         VariableConfig("strike", distribution="uniform", lower_bound=1.0, upper_bound=1.0),
-    #         VariableConfig("barrier", distribution="uniform", lower_bound=1.1, upper_bound=1.8),
-    #         VariableConfig("volatility", distribution="uniform", lower_bound=0.05, upper_bound=0.36),
-    #         VariableConfig("interest_rate", distribution="uniform", lower_bound=0.01, upper_bound=0.21),
-    #         VariableConfig("pricer_expiry", distribution="uniform", lower_bound=1/365, upper_bound=1.0),
-    #     ],
-    #     additional_variables=[],
-    #     derived_variables=[
-    #         VariableConfig("price", generator_function=lambda x, points: x.price(points)),
-    #         VariableConfig("delta", generator_function=lambda x, points: x.delta(points)),
-    #         VariableConfig("gamma", generator_function=lambda x, points: x.gamma(points)),
-    #         VariableConfig("vega", generator_function=lambda x, points: x.vega(points)),
-    #         VariableConfig("theta", generator_function=lambda x, points: x.theta(points)),
-    #         VariableConfig("rho", generator_function=lambda x, points: x.rho(points)),
-    #     ],
-    #     black_scholes_normalize=False,
-    # )
-    #
-    # df = DataGenerator(config).get_data()
-    # print(df.head())
-
-    from pricer.analytical import BlackScholesCall
-    from pricer.config_base import BlackScholesConfig
-    from neural_network.utils import (
-        price_function,
-        delta_function,
-        gamma_function,
-        vega_function,
-        theta_function,
-        rho_function,
-    )
-
-    config = DataGeneratorConfig(
-        pricer=BlackScholesCall,
-        pricer_config=BlackScholesConfig,
-        n=10 ** 6,
-        m=5,
-        parameter_variables=[
-            VariableConfig("strike", distribution="uniform", lower_bound=1.0, upper_bound=1.0),
-            VariableConfig("volatility", distribution="uniform", lower_bound=0.05, upper_bound=0.36),
-            VariableConfig("interest_rate", distribution="uniform", lower_bound=0.01, upper_bound=0.21),
-            VariableConfig("expiry", distribution="uniform", lower_bound=1 / 365, upper_bound=1.0),
-        ],
-        additional_variables=[
-            VariableConfig("underlier_price", distribution="normal", lower_clip=0.6, upper_clip=1.4,
-                           mean_override="discounted_strike"),
-        ],
-        derived_variables=[
-            VariableConfig("price", generator_function=price_function),
-            VariableConfig("delta", generator_function=delta_function),
-            VariableConfig("gamma", generator_function=gamma_function),
-            VariableConfig("vega", generator_function=vega_function),
-            VariableConfig("theta", generator_function=theta_function),
-            VariableConfig("rho", generator_function=rho_function),
-        ],
-        black_scholes_normalize=False,
-    )
-
-    df = DataGenerator(config).get_data()
-    print(df.head())

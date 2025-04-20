@@ -3,65 +3,128 @@ import os
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-import time
-import random
 import numpy as np
-import tensorflow as tf
 import pandas as pd
-from pricer.analytical import BlackScholesCall
-from neural_network.pipeline import Pipeline
-from neural_network.config import bs_put_pipeline_config, bs_call_pipeline_config
-import keras_tuner as kt
+from neural_network.config import pipeline_configs
+from neural_network.torch_pipeline import Pipeline
+from neural_network.config import PipeLineConfig
 
-def model_builder(hp):
-    pipeline_config = bs_call_pipeline_config
+from get_logger import get_logger
 
-    hp_neuron_per_layer = hp.Choice('neuron_per_layer', values=[16, 25, 32, 48])
-    hp_layer_number = hp.Int('layer_number', min_value=4, max_value=11, step=2)
-    hp_hidden_layer_activation = hp.Choice('hidden_layer_activation', values=['relu', 'tanh', 'leaky_relu'])
-    hp_learning_rate = hp.Choice('learning_rate', values=[0.001, 0.0025, 0.005, 0.0075, 0.01])
-    hp_greeks_rel_weight = hp.Choice('greeks_rel_weight', values=[0.01, 0.05, 0.1, 0.2, 0.5])
+logger = get_logger(__name__)
 
-    pipeline_config.model.neuron_per_layer = hp_neuron_per_layer
-    pipeline_config.model.layer_number = hp_layer_number
-    pipeline_config.model.hidden_layer_activation = hp_hidden_layer_activation
-    pipeline_config.model.learning_rate = hp_learning_rate
-    pipeline_config.model.greeks_relative_weight = hp_greeks_rel_weight
+def hyperparameter_optimization(pipeline_config: PipeLineConfig, seed=None):
+    if seed is not None:
+        pipeline_config.train_data.seed = seed
 
-    pipeline = Pipeline(pipeline_config)
-    return pipeline.build_model()
+    neuron_num_list = [16, 24, 32, 48, 64, 96, 128]
+    layer_num_list = [2, 4, 8, 16]
+    activ_func_list = ["tanh", "leaky_relu"]
+    learning_rate_list = [0.001, 0.005, 0.01, 0.05]
+    lambda_param_list = [0.01, 0.1, 0.25, 0.5, 0.75, 1.0]
 
-tuner = kt.Hyperband(model_builder,
-                        objective='val_loss',
-                        max_epochs=20,
-                        factor=10,
-                        directory='hyperparameter_optimization',
-                        project_name='blackscholescall_price')
+    test_cases = set()
+    while len(test_cases) < 20:
+        neuron_num = np.random.choice(neuron_num_list)
+        layer_num = np.random.choice(layer_num_list)
+        activ_func = np.random.choice(activ_func_list)
+        learning_rate = np.random.choice(learning_rate_list)
+        lambda_param = np.random.choice(lambda_param_list)
+        test_cases.add((neuron_num, layer_num, activ_func, learning_rate, lambda_param))
 
-train_data = pd.read_parquet("data/20250317/BlackScholesCall_train.parquet")
-# train_data = train_data.sample(frac=1).reset_index(drop=True)
-validation_data = pd.read_parquet("data/20250317/BlackScholesCall_validation.parquet")
-# validation_data = validation_data.sample(frac=1).reset_index(drop=True)
+    results_list = []
+    pipeline_instance = Pipeline(pipeline_config)
 
-input_variables = bs_call_pipeline_config.model.input_variables
-train_X = train_data[input_variables]
-target_variables = list(bs_call_pipeline_config.model.target_variables.keys())
-train_y =train_data[target_variables]
-greek_variables = list(bs_call_pipeline_config.model.greeks.keys())
-train_greeks = train_data[greek_variables]
+    for neuron_num, layer_num, activ_func, learning_rate, lambda_param in test_cases:
+        pipeline_instance.config.model.neuron_per_layer = neuron_num
+        pipeline_instance.config.model.layer_number = layer_num
+        pipeline_instance.config.model.hidden_layer_activation = activ_func
+        pipeline_instance.config.model.learning_rate = learning_rate
+        pipeline_instance.config.model.lambda_param = lambda_param
+        pipeline_instance.config.model.epochs = 5
 
-validation_X = validation_data[input_variables]
-validation_y = validation_data[target_variables]
-validation_greeks = validation_data[greek_variables]
+        pipeline_instance.train(retrain=True)
+        eval_res = pipeline_instance.evaluate(None)
+        eval_res = {k: [v] for k, v in eval_res.items()}
+        logger.info(f"Evaluation results: {eval_res}")
+        results_list.append(pd.DataFrame(eval_res))
 
-train_dataset = dataset = tf.data.Dataset.from_tensor_slices(
-    (train_X.to_numpy(), train_y.to_numpy(), train_greeks.to_numpy())
-).batch(2**12)
+    first_round_results_df = pd.concat(results_list, axis=0).reset_index(drop=True)
+    first_round_results_df["overall_loss"] = first_round_results_df[
+        [col for col in first_round_results_df if col.startswith("out_sample_")]
+    ].sum(axis=1).values
+    first_round_results_df = first_round_results_df.sort_values(by=["overall_loss"], ascending=True)
 
-validation_dataset = tf.data.Dataset.from_tensor_slices(
-    (validation_X.to_numpy(), validation_y.to_numpy(), validation_greeks.to_numpy())
-).batch(2**11)
+    test_cases = set()
+    for i in range(10):
+        neuron_num = first_round_results_df.iloc[i]["neuron_per_layer"]
+        layer_num = first_round_results_df.iloc[i]["layer_number"]
+        activ_func = first_round_results_df.iloc[i]["hidden_layer_activation"]
+        learning_rate = first_round_results_df.iloc[i]["learning_rate"]
+        lambda_param = first_round_results_df.iloc[i]["lambda_param"]
+        test_cases.add((neuron_num, layer_num, activ_func, learning_rate, lambda_param))
 
-stop_early = tf.keras.callbacks.EarlyStopping(monitor='val_loss', patience=2)
+    results_list = []
+    for neuron_num, layer_num, activ_func, learning_rate, lambda_param in test_cases:
+        pipeline_instance.config.model.neuron_per_layer = neuron_num
+        pipeline_instance.config.model.layer_number = layer_num
+        pipeline_instance.config.model.hidden_layer_activation = activ_func
+        pipeline_instance.config.model.learning_rate = learning_rate
+        pipeline_instance.config.model.lambda_param = lambda_param
+        pipeline_instance.config.model.epochs = 10
 
-tuner.search(train_dataset, epochs=20, validation_data=validation_dataset, callbacks=[stop_early])
+        pipeline_instance.train(retrain=True)
+        eval_res = pipeline_instance.evaluate(None)
+        eval_res = {k: [v] for k, v in eval_res.items()}
+        logger.info(f"Evaluation results: {eval_res}")
+        results_list.append(pd.DataFrame(eval_res))
+
+    second_round_results_df = pd.concat(results_list, axis=0).reset_index(drop=True)
+    second_round_results_df["overall_loss"] = second_round_results_df[
+        [col for col in second_round_results_df if col.startswith("out_sample_")]
+    ].sum(axis=1).values
+    second_round_results_df = second_round_results_df.sort_values(by=["overall_loss"], ascending=True)
+
+    test_cases = set()
+    for i in range(5):
+        neuron_num = second_round_results_df.iloc[i]["neuron_per_layer"]
+        layer_num = second_round_results_df.iloc[i]["layer_number"]
+        activ_func = second_round_results_df.iloc[i]["hidden_layer_activation"]
+        learning_rate = second_round_results_df.iloc[i]["learning_rate"]
+        lambda_param = second_round_results_df.iloc[i]["lambda_param"]
+        test_cases.add((neuron_num, layer_num, activ_func, learning_rate, lambda_param))
+
+    results_list = []
+    for neuron_num, layer_num, activ_func, learning_rate, lambda_param in test_cases:
+        pipeline_instance.config.model.neuron_per_layer = neuron_num
+        pipeline_instance.config.model.layer_number = layer_num
+        pipeline_instance.config.model.hidden_layer_activation = activ_func
+        pipeline_instance.config.model.learning_rate = learning_rate
+        pipeline_instance.config.model.lambda_param = lambda_param
+        pipeline_instance.config.model.epochs = 20
+
+        pipeline_instance.train(retrain=True)
+        eval_res = pipeline_instance.evaluate(None)
+        eval_res = {k: [v] for k, v in eval_res.items()}
+        logger.info(f"Evaluation results: {eval_res}")
+        results_list.append(pd.DataFrame(eval_res))
+
+    third_round_results_df = pd.concat(results_list, axis=0).reset_index(drop=True)
+    third_round_results_df["overall_loss"] = third_round_results_df[
+        [col for col in third_round_results_df if col.startswith("out_sample_")]
+    ].sum(axis=1).values
+    third_round_results_df = third_round_results_df.sort_values(by=["overall_loss"], ascending=True)
+
+    return first_round_results_df, second_round_results_df, third_round_results_df
+
+if __name__ == "__main__":
+    seed = 20250418
+    for config_name, config in pipeline_configs.items():
+        first_round_results_df, second_round_results_df, third_round_results_df = hyperparameter_optimization(config, seed=seed)
+        os.makedirs(os.path.join("hyperparam_optim", str(seed)), exist_ok=True)
+
+        first_round_results_df.to_csv(os.path.join("hyperparam_optim", str(seed), f"{config_name}_first_round.csv"), index=False)
+        second_round_results_df.to_csv(os.path.join("hyperparam_optim", str(seed), f"{config_name}_second_round.csv"), index=False)
+        third_round_results_df.to_csv(os.path.join("hyperparam_optim", str(seed), f"{config_name}_third_round.csv"), index=False)
+
+        logger.info(f"Hyperparameter optimization completed for {config_name}")

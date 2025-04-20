@@ -19,8 +19,10 @@ class ModelConfig:
     input_variables: list[str]
     target_variables: list[str]
     greeks: dict[str, tuple[str]]
-    greeks_relative_weight: float
+    lambda_param: float
     jacobian_batch_size: int
+    calc_greek_regularization: bool
+    greek_weighting: bool
 
 @dataclass
 class PipeLineConfig:

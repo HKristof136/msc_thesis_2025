@@ -12,18 +12,6 @@ class BlackScholesConfig:
     barrier: Union[float, np.ndarray[Any, np.dtype[np.floating]]] = None
 
 @dataclass
-class HestonConfig:
-    underlier_price: Union[float, np.ndarray[Any, np.dtype[np.floating]]]
-    strike: Union[float, np.ndarray[Any, np.dtype[np.floating]]]
-    expiry: Union[float, np.ndarray[Any, np.dtype[np.floating]]]
-    interest_rate: Union[float, np.ndarray[Any, np.dtype[np.floating]]]
-    volatility: Union[float, np.ndarray[Any, np.dtype[np.floating]]]
-    kappa: float
-    theta: float
-    volofvol: float
-    rho: float
-
-@dataclass
 class PDESolverConfig:
     underlier_price_grid: np.ndarray[Any, np.dtype[np.floating]]
     time_grid: np.ndarray[Any, np.dtype[np.floating]]
@@ -34,12 +22,14 @@ class PDESolverConfig:
     verbose: bool = True
     foreign_interest_rate: Optional[float] = 0.0
     variance_grid: Optional[np.ndarray[Any, np.dtype[np.floating]]] = None
-    rho: Optional[float] = None
+    corr: Optional[float] = None
     kappa: Optional[float] = None
-    theta: Optional[float] = None
-    volofvol: Optional[float] = None
+    variance_theta: Optional[float] = None
+    sigma: Optional[float] = None
     adi_param: Optional[float] = 0.5
     vectorize_solver: Optional[bool] = True
+    n: Optional[int] = 26
+    m: Optional[int] = 51
 
 class DefaultConfig:
     black_scholes: BlackScholesConfig = BlackScholesConfig(
@@ -87,18 +77,4 @@ class DefaultConfig:
         interest_rate=0.05,
         volatility=0.2,
         barrier=90.0
-    )
-    heston: HestonConfig = HestonConfig(
-        underlier_price=100.48,
-        # strike=np.random.uniform(70, 120, 30).astype(np.float32),
-        strike=100,
-        # expiry=np.random.uniform(0.01, 1.0, 30).astype(np.float32),
-        expiry=1.0,
-        interest_rate=0.03,
-        # volatility=np.random.uniform(0.1, 0.25, 30).astype(np.float32),
-        volatility=0.04,
-        kappa=2.0,
-        theta=0.04,
-        volofvol=0.3,
-        rho=-0.5
     )

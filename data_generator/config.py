@@ -26,3 +26,6 @@ class DataGeneratorConfig:
     derived_variables: list[VariableConfig]
     black_scholes_normalize: Optional[bool] = True
     seed: Optional[int] = int(datetime.date.today().strftime("%Y%m%d"))
+    data_run_type: Optional[str] = "train"
+    feller_condition: Optional[bool] = False
+    implied_volatility: Optional[bool] = False
