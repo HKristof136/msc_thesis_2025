@@ -28,8 +28,20 @@ class PDESolverConfig:
     sigma: Optional[float] = None
     adi_param: Optional[float] = 0.5
     vectorize_solver: Optional[bool] = True
-    n: Optional[int] = 26
-    m: Optional[int] = 51
+    n: Optional[int] = 51
+    m: Optional[int] = 101
+
+@dataclass
+class MonteCarloConfig:
+    n: int
+    m: int
+    interest_rate: float = None
+    corr: Optional[float] = None
+    kappa: Optional[float] = None
+    variance_theta: Optional[float] = None
+    sigma: Optional[float] = None
+    barrier: float = None
+    strike: float = 1.0
 
 class DefaultConfig:
     black_scholes: BlackScholesConfig = BlackScholesConfig(

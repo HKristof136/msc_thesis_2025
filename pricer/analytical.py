@@ -1,8 +1,7 @@
-from scipy.integrate import quad
 from scipy.stats import norm
 import numpy as np
 from abc import ABC, abstractmethod
-from pricer.config_base import BlackScholesConfig, HestonConfig, DefaultConfig
+from pricer.config_base import BlackScholesConfig, DefaultConfig
 
 
 class BlackScholes(ABC):
@@ -101,15 +100,16 @@ class BlackScholesCall(BlackScholes):
         return self.underlier * norm.pdf(d1) * np.sqrt(self.term)
 
     def theta(self, precision=0.0):
-        d1 = (
-            np.log(self.underlier / self.strike)
-            + (self.r + 0.5 * self.sigma**2) * self.term
-        ) / (self.sigma * np.sqrt(self.term))
-        d2 = d1 - self.sigma * np.sqrt(self.term)
-        return (-1) * (
-            -self.underlier * norm.pdf(d1) * self.sigma / (2 * np.sqrt(self.term))
-            - self.r * self.strike * np.exp(-self.r * self.term) * norm.cdf(d2)
-        )
+        # d1 = (
+        #     np.log(self.underlier / self.strike)
+        #     + (self.r + 0.5 * self.sigma**2) * self.term
+        # ) / (self.sigma * np.sqrt(self.term))
+        # d2 = d1 - self.sigma * np.sqrt(self.term)
+        # return (-1) * (
+        #     -self.underlier * norm.pdf(d1) * self.sigma / (2 * np.sqrt(self.term))
+        #     - self.r * self.strike * np.exp(-self.r * self.term) * norm.cdf(d2)
+        # )
+        return super().theta(precision=0.0001)
 
     def rho(self, precision=0.0):
         d2 = (
@@ -430,9 +430,3 @@ class BarrierDownAndInPut(Barrier):
 class ImpliedVol:
     type = "implied_vol"
     input_names = ["underlier_price", "strike", "expiry", "interest_rate", "price"]
-
-
-if __name__ == "__main__":
-    pricer_cls = HestonCall()
-    price = pricer_cls.price()
-    print("success")

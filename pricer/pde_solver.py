@@ -1,6 +1,7 @@
 import sys
 import os
 import math
+import time
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
@@ -10,6 +11,7 @@ from pricer.analytical import BlackScholesCall, BlackScholesPut
 from pricer.pde_solver_base import CrankNicolsonPDESolver, BarrierUpPDE, BarrierDownPDE, AmericanBarrierUpPDE, \
     AmericanBarrierDownPDE, AmericanOptionPDE, ADISolver
 from scipy.sparse.linalg import splu
+from scipy.interpolate import RegularGridInterpolator
 from scipy.sparse import identity, csc_matrix
 from tqdm import tqdm
 
@@ -352,7 +354,7 @@ class ADIBarrierUpAndOutCallPDE(ADISolver):
         super().__init__(config)
         self.barrier = config.barrier
 
-        c = self.barrier / 10
+        c = self.barrier / 20
         non_uniform_s = np.zeros(self.m)
         for i in range(self.m):
             dk_i = (1 / self.m) * math.asinh(self.barrier / c)
@@ -360,7 +362,7 @@ class ADIBarrierUpAndOutCallPDE(ADISolver):
         non_uniform_s = non_uniform_s[::-1]
         non_uniform_s[-1] += self.strike / 100
 
-        V = 5 * self.sigma
+        V = 3.0
         d = V / 500
 
         non_uniform_v = np.zeros(self.n)
@@ -495,7 +497,7 @@ class ADIBarrierUpAndOutCallPDE(ADISolver):
 
             b1_curr += A1[:, ::self.m] @ self.grid[t, :, 0]
             b1_curr += A1[:, -self.m:] @ self.grid[t, -1, :]
-            b1_curr[self.m-1::self.m] += (self.rd - self.rf) * self.xx[t, :, -1] * np.maximum(-10.0, (0.0 - self.grid[t + 1, :, -2]) / (self.barrier - self.xx[t + 1, :, -2]))
+            b1_curr[self.m-1::self.m] += (self.rd - self.rf) * self.xx[t, :, -1] * (0.0 - self.grid[t + 1, :, -2]) / (self.barrier - self.xx[t + 1, :, -2])
             b1_curr -= (A1[:, 0] * self.grid[t, -1, 0]).toarray().reshape(-1)
 
             b2_curr += A2[:, ::self.m] @ self.grid[t, :, 0]
@@ -526,6 +528,23 @@ class ADIBarrierUpAndOutCallPDE(ADISolver):
             else:
                 self.grid[t, :-1, 1:-1] = y2.reshape(self.n - 1, self.m - 2)
         self.solved = True
+        self.interp_func = RegularGridInterpolator(
+                (self.vv[0, :, 0], self.tt[:, 0, 0], self.xx[0, 0, :]),
+                np.moveaxis(self.grid[:, :, :], [0, 1, 2], [1, 0, 2]),
+                method='linear',
+        )
+
+    def price(self, points):
+        if not isinstance(points, np.ndarray):
+            points = np.array(points)
+        if not self.solved:
+            self.solve()
+
+        interp_points = np.column_stack([points[:, 0], self.max_t - points[:, 1], points[:, 2]])
+        return self.interp_func(interp_points)
+
+    def _calc_greek(self, points, greek, order, precision, n_prec=26, m_prec=26):
+        return super()._calc_greek(points, greek, order, precision, n_prec=51, m_prec=101)
 
 if __name__ == "__main__":
     import cProfile
@@ -533,61 +552,40 @@ if __name__ == "__main__":
     import io
     profiler = cProfile.Profile()
     profiler.enable()
+    import time
 
-    K = 10
-    B = 16
-    S_0 = 12
-
+    s = time.perf_counter()
     config = PDESolverConfig(
         underlier_price_grid=np.array([]),
-        time_grid=np.linspace(0, 0.65125, 101),
-        strike=K / K,
-        barrier=B / K,
-        interest_rate=0.054,
-        volatility=0.34744,
+        time_grid=np.linspace(0, 1.01, 51),
+        strike=1.0,
+        barrier=1.2,
+        interest_rate=0.05,
         corr=-0.5,
         kappa=2.0,
         variance_theta=0.04,
-        sigma=0.2,
+        sigma=0.3,
         adi_param=0.5,
+        n=51,
+        m=101,
     )
     solver = ADIBarrierUpAndOutCallPDE(config)
     solver.solve()
     points = [
-        [0.04, 0.64125, S_0 / K],
-        [0.04, 0.54125, S_0 / K],
-        [0.04, 0.44125, S_0 / K],
-    ]
-    print(K * solver.price(points))
-    print(solver.delta(points))
-    print(solver.vega(points))
-    print(solver.theta(points))
-
-    config = PDESolverConfig(
-        underlier_price_grid=np.array([]),
-        time_grid=np.linspace(0, 0.65125, 101),
-        strike=K,
-        barrier=B,
-        interest_rate=0.054,
-        volatility=0.34744,
-        corr=-0.5,
-        kappa=2.0,
-        variance_theta=0.04,
-        sigma=0.2,
-        adi_param=0.5,
-    )
-    solver = ADIBarrierUpAndOutCallPDE(config)
-    solver.solve()
-    points = [
-        [0.04, 0.64125, S_0],
-        [0.04, 0.54125, S_0],
-        [0.04, 0.44125, S_0],
+        [0.04, 1.0, 1.0],
+        [0.04, 1.0, 1.1],
+        [0.04, 1.0, 1.19],
     ]
     print(solver.price(points))
     print(solver.delta(points))
     print(solver.vega(points))
     print(solver.theta(points))
-
+    print(f"rho {solver.rho(points)}")
+    print(f"partial_correlation: {solver.partial_deriv_correlation(points)}")
+    print(f"partial_kappa: {solver.partial_deriv_kappa(points)}")
+    print(f"partial_theta: {solver.partial_deriv_theta(points)}")
+    print(f"partial_sigma: {solver.partial_deriv_sigma(points)}")
+    print(f"Took: {time.perf_counter() - s:.4f} sec")
     profiler.disable()
     stream = io.StringIO()
     stats = pstats.Stats(profiler, stream=stream).sort_stats('cumulative')

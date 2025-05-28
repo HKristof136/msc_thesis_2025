@@ -4,15 +4,16 @@ import os
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 import torch
+from torch.utils.data import DataLoader
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-
-from torch_model import PricerNetTorch, PricerDataset
-from torch.utils.data import DataLoader
-from config_base import PipeLineConfig
-from get_logger import get_logger
 from tqdm import tqdm
+from sklearn.metrics import r2_score
+
+from neural_network.torch_model import PricerDataset
+from neural_network.config_base import PipeLineConfig
+from get_logger import get_logger
 
 logger = get_logger()
 
@@ -65,7 +66,7 @@ class Pipeline:
 
             if os.path.exists(save_path) and not self.regenerate_data:
                 logger.info(f"Loading {df_type} data from {save_path}")
-                data = pd.read_parquet(save_path)
+                data = pd.read_parquet(save_path).reset_index(drop=True)
 
                 setattr(self, f"{df_type}_data", data)
                 dataset = PricerDataset(data,
@@ -109,7 +110,7 @@ class Pipeline:
         for df_type in ["train", "validation", "test"]:
             if getattr(self, f"{df_type}_data") is None:
                 if os.path.exists(getattr(self, f"{df_type}_save_path")):
-                    data = pd.read_parquet(getattr(self, f"{df_type}_save_path"))
+                    data = pd.read_parquet(getattr(self, f"{df_type}_save_path")).reset_index(drop=True)
                 else:
                     logger.info(f"Loading {df_type} data not found at {getattr(self, f'{df_type}_save_path')}")
                     data_generator = self.config.__dict__[f"{df_type}_data"]
@@ -163,7 +164,7 @@ class Pipeline:
             logger.info(f"Model training memory per batch saved to: {os.path.join(os.getcwd(), 'model_memory', str(self.config.train_data.seed), f'{model_name}_full.csv')}")
 
 
-    def evaluate(self, model_path):
+    def evaluate(self, model_path, create_plots=True):
         logger.info(f"Starting trained model evaluation")
         if not self.model:
             self.model = self.build_model()
@@ -244,8 +245,12 @@ class Pipeline:
                 (self.test_data[variable].values - self.test_data[col_name]) ** 2
             )
 
-        self.create_histogram_plot(concat_data)
-        self.create_slicing_plot()
+        if create_plots:
+            self.create_histogram_plot(concat_data)
+            self.create_slicing_plot()
+        # model_name = f"{self.config.pricing_model.__name__}_{self.config.model.neuron_per_layer}_{self.config.model.layer_number}_{self.config.model.hidden_layer_activation}{'_greek_reg' if self.config.model.calc_greek_regularization else ''}{'_weighted' if self.config.model.greek_weighting else ''}"
+        # with open(f"model_memory/{self.config.train_data.seed}/{model_name}.pickle", "wb+") as f:
+        #     pickle.dump(output_dict, f)
         return output_dict
 
     def create_histogram_plot(self, df):
@@ -255,28 +260,44 @@ class Pipeline:
         out_sample_mask = ~df["in_sample"]
 
         for variable in self.target_variables + list(self.greek_variables.keys()):
+            if "partial" in variable:
+                continue
             logger.info(f"Creating histogram and y=X plots for variable: {variable}")
             model_variable_name = f"model_{variable + '_AD' if variable not in self.target_variables else variable}"
 
             fig, ax = plt.subplots(2, 2, figsize=(10, 10))
             [x.grid(True) for x in ax.flatten()]
+            colors = [x["color"] for x in list(plt.rcParams['axes.prop_cycle'])]
 
             ax[0][0].scatter(
                 df.loc[in_sample_mask, variable],
                 df.loc[
                     in_sample_mask,
                     model_variable_name],
-                    s=0.1
+                    s=0.1,
+                    color=colors[0]
             )
             ax[0][0].plot(
                 [ax[0][0].get_xlim()[0], ax[0][0].get_xlim()[1]],
                 [ax[0][0].get_xlim()[0], ax[0][0].get_xlim()[1]],
                 color="red"
             )
+            latex_dict = {"delta": r"$\Delta$", "vega": r"$\nu$",
+                          "theta": r"$\theta_\tau$", "rho": r"$\rho$",
+                          "price": "ár", "volatility": r"$\sigma_{IV}$",
+                          "modified_vega": r"$\hat{P}/\nu$"}
+            ax[0][0].set_title(f"Tanuló adathalmaz, {latex_dict[variable]}", fontsize=14)
+            ax[0][0].set_xlabel(f"valódi {latex_dict[variable]} érték")
+            ax[0][0].set_ylabel(f"neurális háló által prediktált {latex_dict[variable]} érték")
 
-            ax[0][0].set_title(f"{variable} in sample testing for {self.pricing_model.__name__}")
-            ax[0][0].set_xlabel(f"true {variable} value")
-            ax[0][0].set_ylabel(f"model {variable} value {'(from AD)' if variable not in self.target_variables else ''}")
+            rsquared = r2_score(
+                df.loc[in_sample_mask, variable].values,
+                df.loc[
+                    in_sample_mask,
+                    model_variable_name
+                ].values)
+            ax[0][0].text(abs(ax[0][0].get_xlim()[0]) * 1.25, ax[0][0].get_ylim()[1] * 0.9,
+                          fr"$R^2={rsquared:.4f}$")
 
             residuals = df.loc[in_sample_mask, variable] - df.loc[
                 in_sample_mask,
@@ -284,33 +305,43 @@ class Pipeline:
             ]
 
             ax[0][1].hist(residuals, bins=50)
-            ax[0][1].set_title(f"{variable} error (in sample) for {self.pricing_model.__name__}")
-            ax[0][1].set_xlabel(f"error")
-            ax[0][1].set_ylabel(f"number of observations in a bin")
+            ax[0][1].set_title(f"Tanuló adathalmaz, {latex_dict[variable]} hiba hisztogram", fontsize=14)
+            ax[0][1].set_xlabel(f"hiba")
+            ax[0][1].set_ylabel(f"megfigyelések száma")
 
             ax[1][0].scatter(
                 df.loc[out_sample_mask, variable],
                 df.loc[
                     out_sample_mask,
                     model_variable_name],
-                    s=0.1
+                    s=0.1,
+                    color=colors[0]
             )
             ax[1][0].plot(
                 [ax[1][0].get_xlim()[0], ax[1][0].get_xlim()[1]],
                 [ax[1][0].get_xlim()[0], ax[1][0].get_xlim()[1]],
                 color="red")
-            ax[1][0].set_title(f"{variable} out of sample testing for {self.pricing_model.__name__}")
-            ax[1][0].set_xlabel(f"true {variable} value")
-            ax[1][0].set_ylabel(f"model {variable} value {'(from AD)' if variable not in self.target_variables else ''}")
+            ax[1][0].set_title(f"Teszt adathalmaz, {latex_dict[variable]}", fontsize=14)
+            ax[1][0].set_xlabel(f"valódi {latex_dict[variable]} érték")
+            ax[1][0].set_ylabel(f"neurális háló által prediktált {latex_dict[variable]} érték")
+
+            rsquared_test = r2_score(
+                df.loc[out_sample_mask, variable].values,
+                df.loc[
+                    out_sample_mask,
+                    model_variable_name
+                ].values)
+            ax[1][0].text(abs(ax[1][0].get_xlim()[0]) * 1.25, ax[1][0].get_ylim()[1] * 0.9,
+                          fr"$R^2={rsquared_test:.4f}$")
 
             residuals = df.loc[out_sample_mask, variable] - df.loc[
                 out_sample_mask,
                 model_variable_name
             ]
             ax[1][1].hist(residuals, bins=50)
-            ax[1][1].set_title(f"{variable} error (out of sample) for {self.pricing_model.__name__}")
-            ax[1][1].set_xlabel(f"error")
-            ax[1][1].set_ylabel(f"number of observations in a bin")
+            ax[1][1].set_title(f"Teszt adathalmaz, {latex_dict[variable]} hiba hisztogram", fontsize=14)
+            ax[1][1].set_xlabel(f"hiba")
+            ax[1][1].set_ylabel(f"megfigyelések száma")
 
             plt.tight_layout()
             plt.savefig(f"figures/{model_name}_{variable}.png")
@@ -376,18 +407,18 @@ class Pipeline:
 
                 ax[0][0].plot(
                     test_case_df["underlier_price"], test_case_df["price"],
-                    label=f"price, expiry={expiry_str}", color=colors[i])
+                    label=f"opcióár, lejárat={expiry_str}", color=colors[i])
                 ax[0][0].plot(
                     test_case_df["underlier_price"], test_case_df["model_price"],
-                    label=f"model price, expiry={expiry_str}", color=colors[i], linestyle="--")
-                ax[0][0].set_title("price")
-                ax[0][0].set_xlabel("underlier_price")
-                ax[0][0].set_ylabel("price")
+                    label=f"model ár, lejárat={expiry_str}", color=colors[i], linestyle="--")
+                ax[0][0].set_title("Opcióár", fontsize=14)
+                ax[0][0].set_xlabel(r"$S_0/K$")
+                ax[0][0].set_ylabel("opcióár")
                 ax[0][0].legend()
 
-                ax[0][1].bar(test_case_df["underlier_price"], test_case_df["price"] - test_case_df["model_price"],
+                ax[0][1].bar(test_case_df["underlier_price"], (test_case_df["price"] - test_case_df["model_price"]).abs(),
                              width=0.003,
-                             color=colors[i], alpha=0.3, label=f"price error, expiry={expiry_str}")
+                             color=colors[i], alpha=0.3, label=f"ár L1 hiba, lejárat={expiry_str}")
                 ax[0][1].legend()
 
                 ylim1, ylim2 = min(ylim1, ax[0][1].get_ylim()[0]), max(ylim2, ax[0][1].get_ylim()[1])
@@ -401,23 +432,25 @@ class Pipeline:
                                                           grad_outputs=torch.ones_like(test_case_price),
                                                           create_graph=True)[0]
 
+                latex_dict = {"delta": r"$\Delta$", "vega": r"$\nu$",
+                              "theta": r"$\theta_\tau$", "rho": r"$\rho$"}
                 for j, (greek_name, (ad_i, _)) in enumerate(self.greek_variables.items()):
                     test_case_df.loc[:, f"model_{greek_name}_AD", ] = test_case_gradients[:, ad_i].detach().numpy()
                     ax[j + 1][0].plot(
                         test_case_df["underlier_price"], test_case_df[greek_name],
-                        label=greek_name + f", expiry={expiry_str}", color=colors[i])
+                        label=f"{latex_dict[greek_name]}, lejárat={expiry_str}", color=colors[i])
                     ax[j + 1][0].plot(
                         test_case_df["underlier_price"], test_case_df[f"model_{greek_name}_AD"],
-                        label=greek_name + " from AD" + f", expiry={expiry_str}", color=colors[i], linestyle="--")
-                    ax[j + 1][0].set_title(greek_name)
-                    ax[j + 1][0].set_xlabel("Moneyness")
-                    ax[j + 1][0].set_ylabel(greek_name)
+                        label= f"$model_{'{' + latex_dict[greek_name].replace('$', '') + '}'}$, lejárat={expiry_str}", color=colors[i], linestyle="--")
+                    ax[j + 1][0].set_title(latex_dict[greek_name], fontsize=14)
+                    ax[j + 1][0].set_xlabel(r"$S_0/K$")
+                    ax[j + 1][0].set_ylabel(latex_dict[greek_name])
                     ax[j + 1][0].legend()
 
                     ax[j + 1][1].bar(
                         test_case_df["underlier_price"],
-                        test_case_df[greek_name] - test_case_df[f"model_{greek_name}_AD"],
-                        width=0.003, color=colors[i], alpha=0.3, label=f"{greek_name} error, expiry={expiry_str}")
+                        (test_case_df[greek_name] - test_case_df[f"model_{greek_name}_AD"]).abs(),
+                        width=0.003, color=colors[i], alpha=0.3, label=f"{latex_dict[greek_name]} L1 hiba, lejárat={expiry_str}")
                     ax[j + 1][1].legend()
 
                     ylim1, ylim2 = min(ylim1, ax[j + 1][1].get_ylim()[0]), max(ylim2, ax[j + 1][1].get_ylim()[1])
@@ -432,7 +465,7 @@ class Pipeline:
             "BarrierDownAndOutPutPDE",
             "BarrierDownAndInCallPDE"
         ]:
-            n = slice_config.get("n", 501)
+            n = slice_config.get("n", 301)
             test_case_df = pd.DataFrame(
                 slice_config.get(
                     "underlier_price",
@@ -451,12 +484,12 @@ class Pipeline:
             if "Up" in self.config.pricing_model.__name__:
                 test_case_df["underlier_price"] = np.linspace(
                     self.train_data["underlier_price"].quantile(0.15),
-                    slice_config.get("barrier", self.train_data["barrier"].mean()) - 0.01,
+                    slice_config.get("barrier", self.train_data["barrier"].mean()) - 0.02,
                     n
                 )
                 test_case_df["underlier_price_grid"] = np.linspace(
                     0.01,
-                    slice_config.get("barrier", self.train_data["barrier"].mean()) + 0.01,
+                    slice_config.get("barrier", self.train_data["barrier"].mean()) + 0.02,
                     n
                 )
             else:
@@ -476,6 +509,8 @@ class Pipeline:
                         [30/365, 91/365, 182/365, 273/365],
                         ["1M", "3M", "6M", "9M"]
             )):
+                if expiry_str == "1M":
+                    continue
                 test_case_df["expiry"] = t
                 test_case_df["expiry"] = t
                 pricing_instance_config = {
@@ -521,19 +556,20 @@ class Pipeline:
 
                 ax[0][0].plot(
                     test_case_df["underlier_price"], test_case_df["price"],
-                    label=f"price, expiry={expiry_str}", color=colors[i])
+                    label=f"opcióár, lejárat={expiry_str}", color=colors[i])
                 ax[0][0].plot(
                     test_case_df["underlier_price"], test_case_df["model_price"],
-                    label=f"model price, expiry={expiry_str}", color=colors[i], linestyle="--")
-                ax[0][0].set_title("price")
-                ax[0][0].set_xlabel("underlier_price")
-                ax[0][0].set_ylabel("price")
+                    label=f"model ár, lejárat={expiry_str}", color=colors[i], linestyle="--")
+                ax[0][0].set_title("Opcióár", fontsize=14)
+                ax[0][0].set_xlabel(r"$S_0/K$")
+                ax[0][0].set_ylabel("opcióár")
                 ax[0][0].legend()
 
-                ax[0][1].bar(test_case_df["underlier_price"], test_case_df["price"] - test_case_df["model_price"],
+                ax[0][1].bar(test_case_df["underlier_price"], (test_case_df["price"] - test_case_df["model_price"]).abs(),
                              width=0.003,
-                             color=colors[i], alpha=0.3, label=f"price error, expiry={expiry_str}")
+                             color=colors[i], alpha=0.3, label=f"ár L1 hiba, lejárat={expiry_str}")
                 ax[0][1].legend()
+
                 ylim1, ylim2 = min(ylim1, ax[0][1].get_ylim()[0]), max(ylim2, ax[0][1].get_ylim()[1])
 
                 input_data = torch.tensor(
@@ -545,24 +581,27 @@ class Pipeline:
                                                           grad_outputs=torch.ones_like(test_case_price),
                                                           create_graph=True)[0]
 
+                latex_dict = {"delta": r"$\Delta$", "vega": r"$\nu$",
+                              "theta": r"$\theta_\tau$", "rho": r"$\rho$"}
                 for j, (greek_name, (ad_i, _)) in enumerate(self.greek_variables.items()):
                     test_case_df.loc[:, f"model_{greek_name}_AD", ] = test_case_gradients[:, ad_i].detach().numpy()
                     ax[j + 1][0].plot(
                         test_case_df["underlier_price"], test_case_df[greek_name],
-                        label=greek_name + f", expiry={expiry_str}", color=colors[i])
+                        label=f"{latex_dict[greek_name]}, lejárat={expiry_str}", color=colors[i])
                     ax[j + 1][0].plot(
                         test_case_df["underlier_price"], test_case_df[f"model_{greek_name}_AD"],
-                        label=greek_name + " from AD" + f", expiry={expiry_str}", color=colors[i], linestyle="--")
-                    ax[j + 1][0].set_title(greek_name)
-                    ax[j + 1][0].set_xlabel("Moneyness")
-                    ax[j + 1][0].set_ylabel(greek_name)
+                        label= f"$model_{'{' + latex_dict[greek_name].replace('$', '') + '}'}$, lejárat={expiry_str}", color=colors[i], linestyle="--")
+                    ax[j + 1][0].set_title(latex_dict[greek_name], fontsize=14)
+                    ax[j + 1][0].set_xlabel(r"$S_0/K$")
+                    ax[j + 1][0].set_ylabel(latex_dict[greek_name])
                     ax[j + 1][0].legend()
 
                     ax[j + 1][1].bar(
                         test_case_df["underlier_price"],
-                        test_case_df[greek_name] - test_case_df[f"model_{greek_name}_AD"],
-                        width=0.003, color=colors[i], alpha=0.3, label=f"{greek_name} error, expiry={expiry_str}")
+                        (test_case_df[greek_name] - test_case_df[f"model_{greek_name}_AD"]).abs(),
+                        width=0.003, color=colors[i], alpha=0.3, label=f"{latex_dict[greek_name]} L1 hiba, lejárat={expiry_str}")
                     ax[j + 1][1].legend()
+
                     ylim1, ylim2 = min(ylim1, ax[j + 1][1].get_ylim()[0]), max(ylim2, ax[j + 1][1].get_ylim()[1])
 
             [x.set_ylim(ylim1, ylim2) for x in ax[:, 1].flatten()]
@@ -573,7 +612,7 @@ class Pipeline:
             "ADICallPDE",
             "ADIBarrierUpAndOutCallPDE"
         ]:
-            n = slice_config.get("n", 501)
+            n = slice_config.get("n", 301)
             test_case_df = pd.DataFrame(
                 slice_config.get(
                     "underlier_price",
@@ -595,9 +634,14 @@ class Pipeline:
                     n
                 )
                 test_case_df["barrier"] = slice_config.get("barrier", self.train_data["barrier"].mean())
+                test_case_df["underlier_price"] = np.linspace(
+                    self.train_data["underlier_price"].quantile(0.1),
+                    self.train_data["barrier"].mean() - 0.005,
+                    n
+                )
 
             test_case_df["kappa"] = slice_config.get("kappa", self.train_data["kappa"].mean())
-            test_case_df["variance_theta"] = slice_config.get("theta", self.train_data["theta"].mean())
+            test_case_df["variance_theta"] = slice_config.get("variance_theta", self.train_data["variance_theta"].mean())
             test_case_df["sigma"] = slice_config.get("sigma", self.train_data["sigma"].mean())
             test_case_df["corr"] = slice_config.get("corr", self.train_data["corr"].mean())
             test_case_df["initial_variance"] = slice_config.get("initial_variance",
@@ -612,6 +656,9 @@ class Pipeline:
                         [30/365, 91/365, 182/365, 273/365],
                         ["1M", "3M", "6M", "9M"]
             )):
+                if "Barrier" in self.config.pricing_model.__name__:
+                    if t < 60/365:
+                        continue
                 test_case_df["expiry"] = t
                 pricing_instance_config = {
                     "underlier_price_grid": np.array([]),
@@ -624,7 +671,7 @@ class Pipeline:
                     "sigma": test_case_df["sigma"].values[0],
                     "corr": test_case_df["corr"].values[0],
                     "n": 101,
-                    "m": 301 if "Barrier" not in self.pricing_model.__name__ else 100,
+                    "m": 501,
                 }
                 pricing_instance_config.update(
                     {v: test_case_df.loc[:, v].values for v in self.config.pricing_model.input_names if
@@ -652,19 +699,20 @@ class Pipeline:
 
                 ax[0][0].plot(
                     test_case_df["underlier_price"], test_case_df["price"],
-                    label=f"price, expiry={expiry_str}", color=colors[i])
+                    label=f"opcióár, lejárat={expiry_str}", color=colors[i])
                 ax[0][0].plot(
                     test_case_df["underlier_price"], test_case_df["model_price"],
-                    label=f"model price, expiry={expiry_str}", color=colors[i], linestyle="--")
-                ax[0][0].set_title("price")
-                ax[0][0].set_xlabel("underlier_price")
-                ax[0][0].set_ylabel("price")
+                    label=f"model ár, lejárat={expiry_str}", color=colors[i], linestyle="--")
+                ax[0][0].set_title("Opcióár", fontsize=14)
+                ax[0][0].set_xlabel(r"$S_0/K$")
+                ax[0][0].set_ylabel("opcióár")
                 ax[0][0].legend()
 
-                ax[0][1].bar(test_case_df["underlier_price"], test_case_df["price"] - test_case_df["model_price"],
+                ax[0][1].bar(test_case_df["underlier_price"], (test_case_df["price"] - test_case_df["model_price"]).abs(),
                              width=0.003,
-                             color=colors[i], alpha=0.3, label=f"price error, expiry={expiry_str}")
+                             color=colors[i], alpha=0.3, label=f"ár L1 hiba, lejárat={expiry_str}")
                 ax[0][1].legend()
+
                 ylim1, ylim2 = min(ylim1, ax[0][1].get_ylim()[0]), max(ylim2, ax[0][1].get_ylim()[1])
 
                 input_data = torch.tensor(
@@ -676,24 +724,30 @@ class Pipeline:
                                                           grad_outputs=torch.ones_like(test_case_price),
                                                           create_graph=True)[0]
 
+                latex_dict = {"delta": r"$\Delta$", "vega": r"$\nu$",
+                              "theta": r"$\theta_\tau$", "rho": r"$\rho$"}
+
                 for j, (greek_name, (ad_i, _)) in enumerate(self.greek_variables.items()):
+                    if "partial" in greek_name:
+                        continue
                     test_case_df.loc[:, f"model_{greek_name}_AD", ] = test_case_gradients[:, ad_i].detach().numpy()
                     ax[j + 1][0].plot(
                         test_case_df["underlier_price"], test_case_df[greek_name],
-                        label=greek_name + f", expiry={expiry_str}", color=colors[i])
+                        label=f"{latex_dict[greek_name]}, lejárat={expiry_str}", color=colors[i])
                     ax[j + 1][0].plot(
                         test_case_df["underlier_price"], test_case_df[f"model_{greek_name}_AD"],
-                        label=greek_name + " from AD" + f", expiry={expiry_str}", color=colors[i], linestyle="--")
-                    ax[j + 1][0].set_title(greek_name)
-                    ax[j + 1][0].set_xlabel("Moneyness")
-                    ax[j + 1][0].set_ylabel(greek_name)
+                        label= f"$model_{'{' + latex_dict[greek_name].replace('$', '') + '}'}$, lejárat={expiry_str}", color=colors[i], linestyle="--")
+                    ax[j + 1][0].set_title(latex_dict[greek_name], fontsize=14)
+                    ax[j + 1][0].set_xlabel(r"$S_0/K$")
+                    ax[j + 1][0].set_ylabel(latex_dict[greek_name])
                     ax[j + 1][0].legend()
 
                     ax[j + 1][1].bar(
                         test_case_df["underlier_price"],
-                        test_case_df[greek_name] - test_case_df[f"model_{greek_name}_AD"],
-                        width=0.003, color=colors[i], alpha=0.3, label=f"{greek_name} error, expiry={expiry_str}")
+                        (test_case_df[greek_name] - test_case_df[f"model_{greek_name}_AD"]).abs(),
+                        width=0.003, color=colors[i], alpha=0.3, label=f"{latex_dict[greek_name]} L1 hiba, lejárat={expiry_str}")
                     ax[j + 1][1].legend()
+
                     ylim1, ylim2 = min(ylim1, ax[j + 1][1].get_ylim()[0]), max(ylim2, ax[j + 1][1].get_ylim()[1])
 
             [x.set_ylim(ylim1, ylim2) for x in ax[:, 1].flatten()]
@@ -734,26 +788,34 @@ class Pipeline:
                     )
                 )
                 test_case_df["price"] = pricing_instance.price()
-                test_case_df["vega"] = 1 / pricing_instance.vega()
+                test_case_df["vega"] = pricing_instance.vega()
+                test_case_df["time_value"] = test_case_df["price"] - np.maximum(0, test_case_df["underlier_price"] - np.exp(-test_case_df["interest_rate"] * test_case_df["expiry"]))
+                test_case_df = test_case_df.loc[test_case_df["time_value"] > 1e-4]
+                test_case_df["log_time_value"] = np.log(test_case_df["time_value"])
+
+                test_case_df["modified_vega"] = (1 / test_case_df["vega"]) * test_case_df["time_value"]
 
                 test_case_df["model_volatility"] = self.model(
                     torch.tensor(test_case_df[self.input_variables].values, dtype=torch.float32)
                 ).detach().numpy()
 
-                ax[0][0].plot(
-                    test_case_df["underlier_price"], test_case_df["volatility"],
-                    label=f"implied volatility, expiry={expiry_str}", color=colors[i])
+                if expiry_str == "1M":
+                    ax[0][0].plot(
+                        test_case_df["underlier_price"], test_case_df["volatility"],
+                        label=r"$\sigma_{IV}$", color="black")
                 ax[0][0].plot(
                     test_case_df["underlier_price"], test_case_df["model_volatility"],
-                    label=f"model implied volatility, expiry={expiry_str}", color=colors[i], linestyle="--")
-                ax[0][0].set_title("implied volatility")
-                ax[0][0].set_xlabel("underlier_price")
-                ax[0][0].set_ylabel("implied volatility")
+                    label=r"model $\sigma_{'IV'}$" + f", lejárat={expiry_str}", color=colors[i], linestyle="--")
+                ax[0][0].set_title("Implikált volatilitás", fontsize=14)
+                ax[0][0].set_xlabel(r"$S_0/K$")
+                ax[0][0].set_ylabel(r"$\sigma_{IV}$")
                 ax[0][0].legend()
+                ylim_1_iv, ylim_2_iv = ax[0][0].get_ylim()
+                ax[0][0].set_ylim(ylim_1_iv - 0.002, ylim_2_iv + 0.002)
 
-                ax[0][1].bar(test_case_df["underlier_price"], test_case_df["volatility"] - test_case_df["model_volatility"],
+                ax[0][1].bar(test_case_df["underlier_price"], (test_case_df["volatility"] - test_case_df["model_volatility"]).abs(),
                              width=0.003,
-                             color=colors[i], alpha=0.3, label=f"implied volatility error, expiry={expiry_str}")
+                             color=colors[i], alpha=0.3, label=r"$\sigma_{IV}$" + f", lejárat={expiry_str}")
                 ax[0][1].legend()
                 ylim1, ylim2 = min(ylim1, ax[0][1].get_ylim()[0]), max(ylim2, ax[0][1].get_ylim()[1])
 
@@ -767,29 +829,29 @@ class Pipeline:
                                                           create_graph=True)[0]
                 test_case_df.loc[:, "model_price_deriv_AD"] = test_case_gradients[:, 0].detach().numpy()
                 ax[1][0].plot(
-                    test_case_df["underlier_price"], test_case_df["vega"],
-                    label=f"price_derivative, expiry={expiry_str}", color=colors[i])
+                    test_case_df["underlier_price"], test_case_df["modified_vega"],
+                    label=r"valódi $\hat{P}/\nu$, lejárat={expiry_str}", color=colors[i])
                 ax[1][0].plot(
                     test_case_df["underlier_price"], test_case_df["model_price_deriv_AD"],
-                    label="price_derivative from AD" + f", expiry={expiry_str}", color=colors[i], linestyle="--")
-                ax[1][0].set_title("price_derivative")
-                ax[1][0].set_xlabel("Moneyness")
-                ax[1][0].set_ylabel("price_derivative")
+                    label=r"model $\hat{'P'}/\nu$" + f", lejárat={expiry_str}", color=colors[i], linestyle="--")
+                ax[1][0].set_title("opcióár szerinti derivált", fontsize=14)
+                ax[1][0].set_xlabel(r"$S_0/K$")
+                ax[1][0].set_ylabel("opcióár szerinti derivált")
                 ax[1][0].legend()
 
                 ax[1][1].bar(
-                    test_case_df["underlier_price"], test_case_df["vega"] - test_case_df["model_price_deriv_AD"],
-                    width=0.003, color=colors[i], alpha=0.3, label=f"price_derivative error, expiry={expiry_str}")
+                    test_case_df["underlier_price"], test_case_df["modified_vega"] - test_case_df["model_price_deriv_AD"],
+                    width=0.003, color=colors[i], alpha=0.3, label=f"opcióár szerinti derivált hiba, lejárat={expiry_str}")
                 ax[1][1].legend()
                 ylim1, ylim2 = min(ylim1, ax[1][1].get_ylim()[0]), max(ylim2, ax[1][1].get_ylim()[1])
 
                 [x.set_ylim(ylim1, ylim2) for x in ax[:, 1].flatten()]
-                [x.hlines(y=0.0, xmin=xlim1, xmax=xlim2, color="black") for x in ax[:, 0].flatten()]
+                # [x.hlines(y=0.0, xmin=xlim1, xmax=xlim2, color="black") for x in ax[:, 0].flatten()]
                 [x.set_xlim(xlim1, xlim2) for x in ax[:, 0].flatten()]
 
-                plt.tight_layout()
-                plt.savefig(f"figures/{model_name}_slicing_plot.png")
-                plt.close(fig)
+            plt.tight_layout()
+            plt.savefig(f"figures/{model_name}_slicing_plot.png")
+            plt.close(fig)
             return None
 
         plt.tight_layout()
@@ -805,7 +867,7 @@ if __name__ == "__main__":
     for key, run_config in pipeline_configs.items():
 
         for neuron_num, layer_num, activ_func, greek_reg, lambda_param in [
-            (48, 8, "tanh", True, 0.01),
+            (64, 4, "tanh", True, 0.01),
         ]:
             run_config.train_data.seed = seed
             run_config.model.hidden_layer_activation = activ_func
@@ -816,7 +878,7 @@ if __name__ == "__main__":
             run_config.model.lambda_param = lambda_param
 
             pipeline = Pipeline(run_config)
-            pipeline.train()
+            pipeline.train(retrain=True)
 
             model_name = f"{run_config.pricing_model.__name__}_{run_config.model.neuron_per_layer}_{run_config.model.layer_number}_{run_config.model.hidden_layer_activation}{'_greek_reg' if run_config.model.calc_greek_regularization else ''}{'_weighted' if run_config.model.greek_weighting and False else ''}{'_lambda_' + str(run_config.model.lambda_param) if run_config.model.lambda_param else ''}"
             pipeline.evaluate(f"saved_models/{seed}/{model_name}.model")

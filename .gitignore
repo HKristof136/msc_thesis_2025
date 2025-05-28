@@ -20,4 +20,6 @@ neural_network/playground.ipynb
 data/*
 .idea/
 figures/
-
+hyperparam_optim/
+model_memory/
+saved_models/

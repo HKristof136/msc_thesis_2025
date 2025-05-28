@@ -39,6 +39,8 @@ class PricerNetTorch(nn.Module):
                 layers.append(nn.Tanh())
             elif config['activation_function'] == 'leaky_relu':
                 layers.append(nn.LeakyReLU(negative_slope=0.1))
+            elif config['activation_function'] == 'gelu':
+                layers.append(nn.GELU())
             input_size = config['neuron_per_layer']
         layers.append(nn.Linear(input_size, len(config['target_variables'])))
         if config['activation_function'] != 'leaky_relu':
@@ -49,11 +51,12 @@ class PricerNetTorch(nn.Module):
 
         # self.optimizer = optim.SGD(self.model.parameters(), lr=config['learning_rate'], momentum=0.7)
         self.optimizer = optim.Adam(self.model.parameters(), lr=config['learning_rate'],)
+        self.scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer=self.optimizer, gamma=0.96)
         self.loss_fn = nn.MSELoss()
 
         self.calc_greek_regularization = config['calc_greek_regularization']
         self.greek_weighting = config["greek_weighting"]
-        self.lambda_param = config.get("lambda", 1.0)
+        self.lambda_param = config.get("lambda_param", 1.0)
         self.train_memory = {}
         self.device = config.get('device', 'cpu')
 
@@ -63,9 +66,8 @@ class PricerNetTorch(nn.Module):
     def train_model(self, df, epochs=10, batch_size=2**8, pd_metadata=None):
         self.model.train()
         for epoch in range(epochs):
-            if epoch == 2 and False:
-                self.optimizer = optim.Adam(self.model.parameters(), lr=self.config["learning_rate"])
             max_norm = 1.0
+
             epoch_overall_losses = []
             epoch_losses = []
             epoch_pd_losses = []
@@ -81,7 +83,7 @@ class PricerNetTorch(nn.Module):
                 self.train_memory[epoch][name + "_loss"] = []
                 self.train_memory[epoch][name + "_weight"] = []
 
-            data = PricerDataset(df.sample(10 ** 5),
+            data = PricerDataset(df.sample(9 * 10 ** 4),
                                  self.input_variables,
                                  self.target_variables,
                                  list(pd_metadata.keys())
@@ -90,18 +92,18 @@ class PricerNetTorch(nn.Module):
 
             with tqdm(data, desc=f"Epoch {epoch + 1}/{epochs}", total=len(data)) as pbar:
                 for X, y, Z in pbar:
+                    X.requires_grad = True
                     self.optimizer.zero_grad()
                     output = self.forward(X)
                     X_loss = self.loss_fn(output, y)
-                    X.requires_grad = True
-                    output_grad = self.forward(X)
-                    first_X_loss = self.loss_fn(output_grad, y)
-                    self.train_memory[epoch]["price_loss"].append(first_X_loss.item())
+                    # output_grad = self.forward(X)
+                    # first_X_loss = self.loss_fn(output_grad, y)
+                    self.train_memory[epoch]["price_loss"].append(X_loss.item())
 
                     if pd_metadata:
-                        gradients = torch.autograd.grad(outputs=output_grad, inputs=X,
-                                                        grad_outputs=torch.ones_like(output_grad),
-                                                        create_graph=True)[0]
+                        gradients = torch.autograd.grad(outputs=output, inputs=X,
+                                                        grad_outputs=torch.ones_like(output),
+                                                        create_graph=True, retain_graph=True)[0]
                     Z_loss = 0
                     pd_losses = {}
                     pd_weights = {}
@@ -113,7 +115,10 @@ class PricerNetTorch(nn.Module):
                         self.train_memory[epoch][name + "_loss"].append(pd_loss.item())
                         self.train_memory[epoch][name + "_weight"].append(1.0)
                         pd_weights[name] = 1.0
-                        Z_loss += pd_loss
+                        if name in ["partial_deriv_correlation", "partial_deriv_kappa", "partial_deriv_sigma"]:
+                            Z_loss += 10.0 * pd_loss
+                        else:
+                            Z_loss += 1.0 * pd_loss
 
                     if self.calc_greek_regularization:
                         if self.greek_weighting:
@@ -160,7 +165,7 @@ class PricerNetTorch(nn.Module):
                             epoch_weighted_pd_weights.append(
                                 {name: weight for name, weight in pd_weights.items()})
 
-                        # torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=max_norm)
+                        torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=max_norm)
                         self.optimizer.step()
 
                         overall_loss = X_loss + Z_loss
@@ -196,10 +201,11 @@ class PricerNetTorch(nn.Module):
                         'price_MSE': sum(epoch_losses) / len(epoch_losses),
                         **{f"{name}_MSE": sum([d[name] for d in epoch_pd_losses]) / len(
                             epoch_pd_losses) for name in pd_metadata.keys()},
-                        **{f"{name}_weight": sum([d[name] for d in epoch_weighted_pd_weights]) / len(
-                            epoch_weighted_pd_weights) for name in pd_metadata.keys()},
+                        # **{f"{name}_weight": sum([d[name] for d in epoch_weighted_pd_weights]) / len(
+                        #     epoch_weighted_pd_weights) for name in pd_metadata.keys()},
                         'gradient_norm': sum(epoch_grad_norms) / len(epoch_grad_norms),
                     })
+            self.scheduler.step()
 
     @staticmethod
     def _initialize_weights(module):

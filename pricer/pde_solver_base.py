@@ -534,7 +534,7 @@ class ADISolver:
             k_i = math.asinh(-self.strike / c) + i * dk_i
             non_uniform_s[i] = abs(round(self.strike + c * np.sinh(k_i), 5))
 
-        V = 5 * self.sigma
+        V = 3.0 # 5 * self.sigma
         d = V / 500
 
         non_uniform_v = np.zeros(self.n)
@@ -579,10 +579,10 @@ class ADISolver:
                 idx = i * self.m + j
                 if not i:
                     for o in [-1, 0, 1]:
-                        A1[(idx, idx + o)] = A1.get((idx, idx + o), 0.0) + int(j != (self.m - 1)) * ((self.rd - self.rf) * self.xx[0, 0, j] * self.beta_coef(self.dxx, j, o)) - int(o == 0) * self.rd / 2
+                        A1[(idx, idx + o)] = A1.get((idx, idx + o), 0.0) + int(j != (self.m - 1)) * ((self.rd - self.rf) * self.xx[0, 0, j] * self.beta_coef(self.dxx, j, o)) #- int(o == 0) * self.rd / 2
 
                     for o in [0, 1, 2]:
-                        A2[(idx, idx + o * self.m)] = A2.get((idx, idx + o * self.m), 0.0) + self.k * (self.th - self.vv[0, i, 0]) * self.gamma_coef(self.dvv, i, o) - int(o == 0) * self.rd / 2
+                        A2[(idx, idx + o * self.m)] = A2.get((idx, idx + o * self.m), 0.0) + self.k * (self.th - self.vv[0, i, 0]) * self.gamma_coef(self.dvv, i, o) - int(o == 0) * self.rd# / 2
 
                 else:
                     if self.corr and (j != (self.m - 1)):
@@ -596,38 +596,38 @@ class ADISolver:
                     for o in [-1, 0, 1]:
                         A1[(idx, idx + o)] = A1.get((idx, idx + o), 0.0) + int(j != (self.m - 1)) * (
                                 0.5 * self.xx[0, 0, j] ** 2 * self.vv[0, i, 0] * self.delta_coef(self.dxx, j, o) + (self.rd - self.rf) * self.xx[0, 0, j] * self.beta_coef(self.dxx, j, o)
-                        ) - int(o == 0) * self.rd / 2
+                        )# - int(o == 0) * self.rd / 2
 
                     if self.vv[0, i, 0] <= 1:
                         for o in [-1, 0, 1]:
                             A2[(idx, idx + o * self.m)] = A2.get((idx, idx + o * self.m), 0.0) + (
                                     0.5 * self.sigma ** 2 * self.vv[0, i, 0] * self.delta_coef(self.dvv, i, o) + self.k * (self.th - self.vv[0, i, 0]) * self.beta_coef(self.dvv, i, o)
-                            ) - int(o == 0) * self.rd / 2
+                            ) - int(o == 0) * self.rd# / 2
 
                     else:
                         for o in [-1, 0, 1]:
                             A2[(idx, idx + o * self.m)] = A2.get((idx, idx + o * self.m), 0.0) + (
                                     0.5 * self.sigma ** 2 * self.vv[0, i, 0] * self.delta_coef(self.dvv, i, o)
-                            ) - int(o == 0) * self.rd / 2
+                            ) - int(o == 0) * self.rd# / 2
 
                         for o in [-2, -1, 0]:
                             A2[(idx, idx + o * self.m)] = A2.get((idx, idx + o * self.m), 0.0) + (
                                     self.k * (self.th - self.vv[0, i, 0]) * self.alpha_coef(self.dvv, i, o)
                             )
-        A0 = csc_matrix((list(A0.values()), tuple(zip(*A0.keys()))), shape=(self.n * self.m, self.n * self.m), dtype=np.float32)
-        A1 = csc_matrix((list(A1.values()), tuple(zip(*A1.keys()))), shape=(self.n * self.m, self.n * self.m), dtype=np.float32)
-        A2 = csc_matrix((list(A2.values()), tuple(zip(*A2.keys()))), shape=(self.n * self.m, self.n * self.m), dtype=np.float32)
+        self.A0 = csc_matrix((list(A0.values()), tuple(zip(*A0.keys()))), shape=(self.n * self.m, self.n * self.m), dtype=np.float32)
+        self.A1 = csc_matrix((list(A1.values()), tuple(zip(*A1.keys()))), shape=(self.n * self.m, self.n * self.m), dtype=np.float32)
+        self.A2 = csc_matrix((list(A2.values()), tuple(zip(*A2.keys()))), shape=(self.n * self.m, self.n * self.m), dtype=np.float32)
 
         i, j = np.meshgrid(np.arange(self.n), np.arange(self.m), indexing='ij')
         nbi_mask = (i != self.n - 1) & (j != 0)
         non_boundary_indices = np.where(nbi_mask)
-        nbi = i[non_boundary_indices] * self.m + j[non_boundary_indices]
+        self.nbi = i[non_boundary_indices] * self.m + j[non_boundary_indices]
         dt = self.tt[-1, 0, 0] - self.tt[-2, 0, 0]
 
-        A = A0 + A1 + A2
+        A = self.A0 + self.A1 + self.A2
 
-        A1_LU_sp = splu(identity(nbi.shape[0], format="csc") - self.adi_param * dt * A1[:, nbi][nbi, :])
-        A2_LU_sp = splu(identity(nbi.shape[0], format="csc") - self.adi_param * dt * A2[:, nbi][nbi, :])
+        self.A1_LU_sp = splu(identity(self.nbi.shape[0], format="csc") - self.adi_param * dt * self.A1[:, self.nbi][self.nbi, :])
+        self.A2_LU_sp = splu(identity(self.nbi.shape[0], format="csc") - self.adi_param * dt * self.A2[:, self.nbi][self.nbi, :])
 
         b0_prev, b1_prev, b2_prev = None, None, None
         b0_curr, b1_curr, b2_curr = None, None, None
@@ -635,24 +635,24 @@ class ADISolver:
         for t in tqdm(range(-2, -self.tt.shape[0] - 1, -1), disable=not self.verbose):
             if b0_prev is None:
                 b0_prev = np.zeros(self.n * self.m, dtype=np.float32)
-                b0_prev += A0[:, ::self.m] @ self.grid[t + 1, :, 0]
-                b0_prev += A0[:, -self.m:] @ self.grid[t + 1, -1, :]
-                b0_prev -= (A0[:, 0] * self.grid[t + 1, -1, 0]).toarray().reshape(-1)
+                b0_prev += self.A0[:, ::self.m] @ self.grid[t + 1, :, 0]
+                b0_prev += self.A0[:, -self.m:] @ self.grid[t + 1, -1, :]
+                b0_prev -= (self.A0[:, 0] * self.grid[t + 1, -1, 0]).toarray().reshape(-1)
             else:
                 b0_prev = b0_curr
             if b1_prev is None:
                 b1_prev = np.zeros(self.n * self.m, dtype=np.float32)
-                b1_prev += A1[:, ::self.m] @ self.grid[t + 1, :, 0]
-                b1_prev += A1[:, -self.m:] @ self.grid[t + 1, -1, :]
+                b1_prev += self.A1[:, ::self.m] @ self.grid[t + 1, :, 0]
+                b1_prev += self.A1[:, -self.m:] @ self.grid[t + 1, -1, :]
                 b1_prev[self.m - 1::self.m] += (self.rd - self.rf) * self.xx[t + 1, :, -1] * np.exp(-self.rf * self.tt[t + 1, :, -1])
-                b1_prev -= (A1[:, 0] * self.grid[t + 1, -1, 0]).toarray().reshape(-1)
+                b1_prev -= (self.A1[:, 0] * self.grid[t + 1, -1, 0]).toarray().reshape(-1)
             else:
                 b1_prev = b1_curr
             if b2_prev is None:
                 b2_prev = np.zeros(self.n * self.m, dtype=np.float32)
-                b2_prev += A2[:, ::self.m] @ self.grid[t + 1, :, 0]
-                b2_prev += A2[:, -self.m:] @ self.grid[t + 1, -1, :]
-                b2_prev -= (A2[:, 0] * self.grid[t + 1, -1, 0]).toarray().reshape(-1)
+                b2_prev += self.A2[:, ::self.m] @ self.grid[t + 1, :, 0]
+                b2_prev += self.A2[:, -self.m:] @ self.grid[t + 1, -1, :]
+                b2_prev -= (self.A2[:, 0] * self.grid[t + 1, -1, 0]).toarray().reshape(-1)
             else:
                 b2_prev = b2_curr
 
@@ -660,38 +660,38 @@ class ADISolver:
             b1_curr = np.zeros(self.n * self.m, dtype=np.float32)
             b2_curr = np.zeros(self.n * self.m, dtype=np.float32)
 
-            b0_curr += A0[:, ::self.m] @ self.grid[t, :, 0]
-            b0_curr += A0[:, -self.m:] @ self.grid[t, -1, :]
-            b0_curr -= (A0[:, 0] * self.grid[t, -1, 0]).toarray().reshape(-1)
+            b0_curr += self.A0[:, ::self.m] @ self.grid[t, :, 0]
+            b0_curr += self.A0[:, -self.m:] @ self.grid[t, -1, :]
+            b0_curr -= (self.A0[:, 0] * self.grid[t, -1, 0]).toarray().reshape(-1)
 
-            b1_curr += A1[:, ::self.m] @ self.grid[t, :, 0]
-            b1_curr += A1[:, -self.m:] @ self.grid[t, -1, :]
+            b1_curr += self.A1[:, ::self.m] @ self.grid[t, :, 0]
+            b1_curr += self.A1[:, -self.m:] @ self.grid[t, -1, :]
             b1_curr[self.m-1::self.m] += (self.rd - self.rf) * self.xx[t, :, -1] * np.exp(-self.rf * self.tt[t, :, -1])
-            b1_curr -= (A1[:, 0] * self.grid[t, -1, 0]).toarray().reshape(-1)
+            b1_curr -= (self.A1[:, 0] * self.grid[t, -1, 0]).toarray().reshape(-1)
 
-            b2_curr += A2[:, ::self.m] @ self.grid[t, :, 0]
-            b2_curr += A2[:, -self.m:] @ self.grid[t, -1, :]
-            b2_curr -= (A2[:, 0] * self.grid[t, -1, 0]).toarray().reshape(-1)
+            b2_curr += self.A2[:, ::self.m] @ self.grid[t, :, 0]
+            b2_curr += self.A2[:, -self.m:] @ self.grid[t, -1, :]
+            b2_curr -= (self.A2[:, 0] * self.grid[t, -1, 0]).toarray().reshape(-1)
 
             b_prev = b0_prev + b1_prev + b2_prev
 
-            y0 = self.grid[t + 1, :-1, 1:].reshape(-1, 1) + dt * (A[:, nbi][nbi, :] @ self.grid[t + 1, :-1, 1:].reshape(-1, 1) + b_prev[nbi].reshape(-1, 1))
+            y0 = self.grid[t + 1, :-1, 1:].reshape(-1, 1) + dt * (A[:, self.nbi][self.nbi, :] @ self.grid[t + 1, :-1, 1:].reshape(-1, 1) + b_prev[self.nbi].reshape(-1, 1))
             y0 = y0.reshape(-1, 1)
 
-            y1 = A1_LU_sp.solve(
-                y0 - self.adi_param * dt * (A1[:, nbi][nbi, :] @ self.grid[t + 1, :-1, 1:].reshape(-1, 1) + b1_prev[nbi].reshape(-1, 1) - b1_curr[nbi].reshape(-1, 1))
+            y1 = self.A1_LU_sp.solve(
+                y0 - self.adi_param * dt * (self.A1[:, self.nbi][self.nbi, :] @ self.grid[t + 1, :-1, 1:].reshape(-1, 1) + b1_prev[self.nbi].reshape(-1, 1) - b1_curr[self.nbi].reshape(-1, 1))
             )
 
-            y2 = A2_LU_sp.solve(
-                y1 - self.adi_param * dt * (A2[:, nbi][nbi, :] @ self.grid[t + 1, :-1, 1:].reshape(-1, 1) + b2_prev[nbi].reshape(-1, 1) - b2_curr[nbi].reshape(-1, 1))
+            y2 = self.A2_LU_sp.solve(
+                y1 - self.adi_param * dt * (self.A2[:, self.nbi][self.nbi, :] @ self.grid[t + 1, :-1, 1:].reshape(-1, 1) + b2_prev[self.nbi].reshape(-1, 1) - b2_curr[self.nbi].reshape(-1, 1))
             )
             if self.corr:
-                y0_hat = y0 + self.adi_param * dt * (A0[:, nbi][nbi, :] @ y2.reshape(-1, 1) + b0_curr[nbi].reshape(-1, 1) - (A0[:, nbi][nbi, :] @ self.grid[t + 1, :-1, 1:].reshape(-1, 1) + b0_prev[nbi].reshape(-1, 1)))
-                y1_hat = A1_LU_sp.solve(
-                    y0_hat - self.adi_param * dt * (A1[:, nbi][nbi, :] @ self.grid[t + 1, :-1, 1:].reshape(-1, 1) + b1_prev[nbi].reshape(-1, 1) - b1_curr[nbi].reshape(-1, 1))
+                y0_hat = y0 + self.adi_param * dt * (self.A0[:, self.nbi][self.nbi, :] @ y2.reshape(-1, 1) + b0_curr[self.nbi].reshape(-1, 1) - (self.A0[:, self.nbi][self.nbi, :] @ self.grid[t + 1, :-1, 1:].reshape(-1, 1) + b0_prev[self.nbi].reshape(-1, 1)))
+                y1_hat = self.A1_LU_sp.solve(
+                    y0_hat - self.adi_param * dt * (self.A1[:, self.nbi][self.nbi, :] @ self.grid[t + 1, :-1, 1:].reshape(-1, 1) + b1_prev[self.nbi].reshape(-1, 1) - b1_curr[self.nbi].reshape(-1, 1))
                 )
-                y2_hat = A2_LU_sp.solve(
-                    y1_hat - self.adi_param * dt * (A2[:, nbi][nbi, :] @ self.grid[t + 1, :-1, 1:].reshape(-1, 1) + b2_prev[nbi].reshape(-1, 1) - b2_curr[nbi].reshape(-1, 1))
+                y2_hat = self.A2_LU_sp.solve(
+                    y1_hat - self.adi_param * dt * (self.A2[:, self.nbi][self.nbi, :] @ self.grid[t + 1, :-1, 1:].reshape(-1, 1) + b2_prev[self.nbi].reshape(-1, 1) - b2_curr[self.nbi].reshape(-1, 1))
                 )
                 self.grid[t, :-1, 1:] = y2_hat.reshape(self.n - 1, self.m - 1)
             else:
@@ -752,7 +752,7 @@ class ADISolver:
         )
         return interp_func(interp_points)
 
-    def _calc_greek(self, points, greek, order, precision):
+    def _calc_greek(self, points, greek, order, precision, n_prec=26, m_prec=26):
         if not isinstance(points, np.ndarray):
             points = np.array(points)
         if not self.solved:
@@ -783,7 +783,7 @@ class ADISolver:
         else:
             up_config = PDESolverConfig(
                 underlier_price_grid=self.config.underlier_price_grid,
-                time_grid=self.config.time_grid,
+                time_grid=np.linspace(self.config.time_grid[0], self.config.time_grid[-1], 51),
                 variance_grid=self.config.variance_grid,
                 strike=self.config.strike,
                 interest_rate=self.config.interest_rate + precision if greek == "rho" else self.config.interest_rate,
@@ -791,15 +791,16 @@ class ADISolver:
                 kappa=self.config.kappa + precision if greek == "partial_deriv_kappa" else self.config.kappa,
                 variance_theta=self.config.variance_theta + precision if greek == "partial_deriv_theta" else self.config.variance_theta,
                 sigma=self.config.sigma + precision if greek == "partial_deriv_sigma" else self.config.sigma,
-                n=self.n,
-                m=self.m,
+                n=n_prec,
+                m=m_prec,
+                barrier=self.config.barrier,
                 verbose=False
             )
             price_up = self.__class__(up_config).price(points)
 
             down_config = PDESolverConfig(
                 underlier_price_grid=self.config.underlier_price_grid,
-                time_grid=self.config.time_grid,
+                time_grid=np.linspace(self.config.time_grid[0], self.config.time_grid[-1], 51),
                 variance_grid=self.config.variance_grid,
                 strike=self.config.strike,
                 interest_rate=self.config.interest_rate - precision if greek == "rho" else self.config.interest_rate,
@@ -807,8 +808,9 @@ class ADISolver:
                 kappa=self.config.kappa - precision if greek == "partial_deriv_kappa" else self.config.kappa,
                 variance_theta=self.config.variance_theta - precision if greek == "partial_deriv_theta" else self.config.variance_theta,
                 sigma=self.config.sigma - precision if greek == "partial_deriv_sigma" else self.config.sigma,
-                n=self.n,
-                m=self.m,
+                n=n_prec,
+                m=m_prec,
+                barrier=self.config.barrier,
                 verbose=False
             )
             price_down = self.__class__(down_config).price(points)
@@ -847,24 +849,25 @@ class ADISolver:
 
 if __name__ == "__main__":
     import time
+    import pandas as pd
 
     s = time.perf_counter()
     config = PDESolverConfig(
         underlier_price_grid=np.array([]),
         time_grid=np.linspace(0, 1.01, 51, dtype=np.float32),
-        strike=1.440431,
-        interest_rate=0.207,
-        corr=-0.406,
-        kappa=2.379,
-        variance_theta=0.00906 * 3,
-        sigma=0.5916,
-        n=51,
-        m=51,
+        strike=1.0,
+        interest_rate=0.05,
+        corr=-0.5,
+        kappa=2.0,
+        variance_theta=0.04,
+        sigma=0.3,
+        n=101,
+        m=101,
     )
     solver = ADISolver(config)
     solver.solve()
 
-    points = np.array([[0.1570, 0.98644, 1.38]])
+    points = np.array([[0.04, 1.0, 1.1]])
     print(f"Price: {solver.price(points)}")
     print(f"delta: {solver.delta(points)}")
     print(f"theta: {solver.theta(points)}")
@@ -876,3 +879,29 @@ if __name__ == "__main__":
     print(f"partial_sigma: {solver.partial_deriv_sigma(points)}")
 
     print(f"Took {time.perf_counter() - s:.5f} seconds")
+
+    run_time_array = np.zeros((5, 5))
+
+    for i, n in enumerate([5, 25, 50, 100, 250]):
+        for j, m in enumerate([5, 25, 50, 100, 250]):
+            config = PDESolverConfig(
+                underlier_price_grid=np.array([]),
+                time_grid=np.linspace(0, 1.01, 101, dtype=np.float32),
+                strike=1.0,
+                interest_rate=0.04,
+                corr=-0.3,
+                kappa=2.0,
+                variance_theta=0.04,
+                sigma=0.2,
+                n=n,
+                m=m,
+                verbose=False
+            )
+            run_times = []
+            for _ in range(10):
+                print(i, n, j, m, _)
+                s = time.perf_counter()
+                call_price = ADISolver(config).solve()
+                run_times.append(time.perf_counter() - s)
+            run_time_array[i, j] = np.mean(run_times)
+    pd.DataFrame(run_time_array, columns=[5, 25, 50, 100, 250], index=[5, 25, 50, 100, 250]).to_csv("adi_runtimes.csv")

@@ -177,8 +177,11 @@ class DataGenerator:
 
         if self.config.implied_volatility:
             logger.info("Constraint on vega in the dataset for ImpliedVol")
-            df = df.loc[df["vega"] >= 0.1]
-            df["vega"] = 1 / df["vega"]
+            df["time_value"] = df["price"] - np.maximum(0, df["underlier_price"] - np.exp(-df["interest_rate"] * df["expiry"]))
+            df = df.loc[df["time_value"] > 1e-4]
+            df["log_time_value"] = np.log(df["time_value"])
+
+            df["modified_vega"] = (1 / df["vega"]) * df["time_value"]
         self.data = df
 
     def process_row_cn(self, row, m, row_ind):
@@ -187,9 +190,9 @@ class DataGenerator:
                                                                                 self.config.derived_variables],
                                        dtype=np.float32)
         if "Up" in self.config.pricer.__name__:
-            underlier_grid = np.linspace(0.01, row["barrier"] + 0.01, 201)
+            underlier_grid = np.linspace(0.01, row["barrier"] + 0.01, 101)
         else:
-            ds_grid = np.linspace(0.01, row["barrier"] + 0.01, 201)
+            ds_grid = np.linspace(0.01, row["barrier"] + 0.01, 101)
             ds = ds_grid[1] - ds_grid[0]
             underlier_grid = np.arange(0.01, row["barrier"] * 2, ds)
         time_grid = np.linspace(0, row["pricer_expiry"] + 0.01, 101)
@@ -206,9 +209,9 @@ class DataGenerator:
 
         mask = (0.01 <= pricer.t) & (pricer.t <= row["pricer_expiry"] / 2)
         if "Up" in self.config.pricer.__name__:
-            mask = mask & (row["barrier"] * 0.7 <= pricer.x) & (pricer.x <= (row["barrier"] - 0.01))
+            mask = mask & (row["barrier"] * 0.6 <= pricer.x) & (pricer.x <= (row["barrier"] - 0.01))
         else:
-            mask = mask & ((row["barrier"] + 0.01) <= pricer.x) & (pricer.x <= row["barrier"] * 1.3)
+            mask = mask & ((row["barrier"] + 0.01) <= pricer.x) & (pricer.x <= row["barrier"] * 1.4)
         points_in_scope = np.maximum(0.0, pricer.grid[mask]).flatten()
 
         points_ind = self.rng.choice(np.arange(points_in_scope.shape[0]), size=m,)
@@ -246,12 +249,12 @@ class DataGenerator:
         pricer.solve()
 
         if "barrier" not in self.config.pricer.input_names:
-            expiry = time_offset # self.rng.uniform(time_offset, row["pricer_expiry"] / 2, m).astype(np.float32)
+            expiry = self.rng.uniform(time_offset, row["pricer_expiry"] / 2, m).astype(np.float32)
             discounted_strike = pricer.strike * np.exp(-row["interest_rate"] * expiry)
             underlier_price = np.clip(
-                self.rng.normal(discounted_strike, 0.1 * discounted_strike, m),
-                0.1 * discounted_strike,
-                1.9 * discounted_strike
+                self.rng.normal(discounted_strike, 0.1, m),
+                0.1,
+                1.9
             ).astype(np.float32)
             variance = self.rng.uniform(row["variance_theta"] * 0.75, row["variance_theta"] * 1.25, m).astype(np.float32)
 
@@ -261,21 +264,30 @@ class DataGenerator:
             points[:, 2] = underlier_price
         else:
             mask = (0.01 <= pricer.tt) & (pricer.tt <= row["pricer_expiry"] / 2)
-            mask = mask & (row["barrier"] * 0.75 <= pricer.xx) & (pricer.xx <= (row["barrier"] - 0.01))
+            mask = mask & (row["barrier"] * 0.6 <= pricer.xx) & (pricer.xx <= (row["barrier"] - 0.01))
             mask = mask & (pricer.vv >= pricer.th / 2) & (pricer.vv <= pricer.th * 2)
-            points_in_scope = np.maximum(0.0, pricer.grid[mask]).flatten()
-            points_ind = self.rng.choice(np.arange(points_in_scope.shape[0]), size=m,)
 
-            points = np.zeros(shape=(m, 3))
-            points[:, 0] = pricer.vv[mask].flatten()[points_ind]
+            points_in_scope = np.maximum(0.0, pricer.grid[mask]).flatten()
+            points_ind = self.rng.choice(np.arange(points_in_scope.shape[0]), size=m, )
+
+            # expiry = self.rng.uniform(time_offset, row["pricer_expiry"] / 2, m).astype(np.float32)
+            # underlier_points = self.rng.uniform(row["barrier"] * 0.7, row["barrier"] - 0.01, m).astype(np.float32)
+            # variance = self.rng.uniform(row["variance_theta"] * 0.75, row["variance_theta"] * 1.25, m).astype(np.float32)
+
+            points = np.zeros(shape=(m, 4), dtype=np.float32)
+            points[:, 0] = pricer.vv[mask].flatten()[points_ind] # variance
             points[:, 1] = pricer.max_t - pricer.tt[mask].flatten()[points_ind]
             points[:, 2] = pricer.xx[mask].flatten()[points_ind]
+            points[:, 3] = pricer.grid[mask].flatten()[points_ind]
 
         temp_derived_df.loc[:, "initial_variance"] = points[:, 0]
         temp_derived_df.loc[:, "underlier_price"] = points[:, 2]
         temp_derived_df.loc[:, "expiry"] = points[:, 1]
 
         for variable in self.config.derived_variables:
+            if "barrier" in self.config.pricer.input_names and variable.name == "price":
+                temp_derived_df.loc[:, variable.name] = points[:, 3]
+                continue
             temp_derived_df.loc[:, variable.name] = self.generate_variable(
                 variable, size=m,
                 pricer=pricer, points=points, verbose=False
